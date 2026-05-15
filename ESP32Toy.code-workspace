@@ -1,0 +1,51 @@
+{
+    "folders": [
+        {
+            "name": "ESP32Toy",
+            "path": "."
+        }
+    ],
+    "settings": {
+        // ESP-IDF 配置
+        "idf.adapterTargetName": "esp32",
+        "idf.portWin": "COM3",
+        "idf.flashBaudRate": 921600,
+        "idf.monitorBaudRate": 115200,
+        "idf.openOcdConfigs": [
+            "board/esp32-wrover-kit-3.3v.cfg"
+        ],
+
+        // 编辑器配置
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "files.encoding": "utf8",
+        "files.eol": "\n",
+
+        // C/C++ 配置
+        "C_Cpp.default.intelliSenseMode": "gcc-x64",
+        "C_Cpp.default.compilerPath": "",
+        "C_Cpp.default.cStandard": "c17",
+
+        // 搜索排除
+        "search.exclude": {
+            "build/**": true,
+            "managed_components/**": true
+        },
+
+        // 文件排除
+        "files.exclude": {
+            "build/**": true,
+            "**/.git": true,
+            "**/.DS_Store": true
+        }
+    },
+    "extensions": {
+        "recommendations": [
+            "ms-vscode.cpptools",
+            "espressif.esp-idf-extension",
+            "ms-vscode.cmake-tools",
+            "twxs.cmake"
+        ]
+    }
+}

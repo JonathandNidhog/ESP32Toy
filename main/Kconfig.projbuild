@@ -1,0 +1,10 @@
+menu "ESP32Toy Configuration"
+
+    config ESP32TOY_BLINK_GPIO
+        int "Blink GPIO number"
+        default 2
+        range 0 39
+        help
+            GPIO number for the LED blink.
+
+endmenu

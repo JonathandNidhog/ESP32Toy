@@ -1,0 +1,39 @@
+# ESP-IDF build output
+build/
+sdkconfig
+*.bin
+*.elf
+*.hex
+*.map
+*.partitions.bin
+*.bootloader.bin
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# IDE / Editor
+.vscode/settings.json
+.vscode/tasks.json
+.vscode/launch.json
+.vscode/ipch/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake
+CMakeFiles/
+cmake-build-*/
+CMakeCache.txt
+CMakeUserPresets.json
+
+# Managed components
+managed_components/
+
+# Dependencies
+dependencies.lock
