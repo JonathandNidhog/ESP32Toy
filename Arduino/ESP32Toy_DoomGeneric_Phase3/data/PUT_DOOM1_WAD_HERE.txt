@@ -1,0 +1,16 @@
+Put your legally obtained Doom shareware IWAD here as:
+
+    doom1.wad
+
+Final local folder layout:
+
+    Arduino/ESP32Toy_DoomGeneric_Phase3/data/doom1.wad
+
+When the LittleFS filesystem image is uploaded to the ESP32-S3 board,
+this file becomes visible to the sketch as:
+
+    /doom1.wad
+
+The runtime POSIX path passed to DoomGeneric is:
+
+    /littlefs/doom1.wad
