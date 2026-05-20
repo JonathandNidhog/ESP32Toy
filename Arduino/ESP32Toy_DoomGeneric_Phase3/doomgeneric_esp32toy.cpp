@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <stdio.h>
+#include <string.h>
 #include "FS.h"
 #include <LittleFS.h>
 #include <Adafruit_GFX.h>
