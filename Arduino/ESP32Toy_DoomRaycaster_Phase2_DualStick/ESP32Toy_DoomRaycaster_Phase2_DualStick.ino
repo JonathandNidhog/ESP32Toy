@@ -20,14 +20,14 @@
 //   SW -> IO13
 //
 // Controls:
-//   New stick UP/DOWN    -> move forward / backward
-//   New stick LEFT/RIGHT -> strafe left / right
-//   Old stick LEFT/RIGHT -> turn camera left / right
-//   Old stick UP/DOWN    -> smooth vertical look / horizon shift
+//   Old stick UP/DOWN    -> move forward / backward
+//   Old stick LEFT/RIGHT -> strafe left / right
+//   New stick LEFT/RIGHT -> turn camera left / right
+//   New stick UP/DOWN    -> smooth vertical look / horizon shift
 //   A key IO15           -> fire test + motor pulse + muzzle flash
 //   B key IO14           -> reset player position
-//   Old joystick SW IO6  -> toggle minimap
-//   New joystick SW IO13 -> sprint while held
+//   Old joystick SW IO6  -> sprint while held
+//   New joystick SW IO13 -> toggle minimap
 //   Pot IO1              -> base move speed scale
 //   RGB IO47             -> red Doom pulse / muzzle flash
 // ============================================================
@@ -171,24 +171,24 @@ const float TURN_SIGN = -1.0f;
 const float LOOK_SIGN = -1.0f;
 
 // Fake vertical look state. This is a classic raycaster-style horizon shift,
-// not true 3D pitch, but it makes the right-stick Y direction meaningful.
+// not true 3D pitch, but it makes the new-stick Y direction meaningful.
 float lookPitchPixels = 0.0f;
 const float LOOK_PITCH_MAX = 18.0f;
 
 bool keyAPrevRaw = HIGH;
 bool keyBPrevRaw = HIGH;
-bool rightSWPrevRaw = HIGH;
+bool leftSWPrevRaw = HIGH;
 bool keyAStable = HIGH;
 bool keyBStable = HIGH;
-bool rightSWStable = HIGH;
+bool leftSWStable = HIGH;
 bool keyAEdge = false;
 bool keyBEdge = false;
-bool rightSWEdge = false;
+bool leftSWEdge = false;
 uint32_t keyAChangedMs = 0;
 uint32_t keyBChangedMs = 0;
-uint32_t rightSWChangedMs = 0;
+uint32_t leftSWChangedMs = 0;
 
-bool leftSWPressed = false;
+bool rightSWPressed = false;
 bool keyARawPressed = false;
 uint32_t lastFireMs = 0;
 
@@ -295,12 +295,12 @@ void updateInputs() {
   leftRawX = analogRead(LEFT_JOY_X_PIN);
   leftRawY = analogRead(LEFT_JOY_Y_PIN);
   potRaw = analogRead(POT_PIN);
-  leftSWPressed = digitalRead(LEFT_JOY_SW_PIN) == LOW;
+  rightSWPressed = digitalRead(RIGHT_JOY_SW_PIN) == LOW;
   keyARawPressed = digitalRead(KEY_A_PIN) == LOW;
 
   debounceButton(KEY_A_PIN, &keyAPrevRaw, &keyAStable, &keyAEdge, &keyAChangedMs);
   debounceButton(KEY_B_PIN, &keyBPrevRaw, &keyBStable, &keyBEdge, &keyBChangedMs);
-  debounceButton(RIGHT_JOY_SW_PIN, &rightSWPrevRaw, &rightSWStable, &rightSWEdge, &rightSWChangedMs);
+  debounceButton(LEFT_JOY_SW_PIN, &leftSWPrevRaw, &leftSWStable, &leftSWEdge, &leftSWChangedMs);
 
   if (keyAEdge) {
     fireNow();
@@ -318,7 +318,7 @@ void updateInputs() {
     motorPulse(110);
   }
 
-  if (rightSWEdge) {
+  if (leftSWEdge) {
     minimapEnabled = !minimapEnabled;
     motorPulse(65);
   }
@@ -335,10 +335,10 @@ void readDualStickAxes(float *moveAxis, float *strafeAxis, float *turnAxis, floa
   leftAxisX = applyDeadzone(leftAxisX, 0.14f);
   leftAxisY = applyDeadzone(leftAxisY, 0.14f);
 
-  *moveAxis = leftAxisY * MOVE_SIGN;
-  *strafeAxis = leftAxisX * STRAFE_SIGN;
-  *turnAxis = rightAxisX * TURN_SIGN;
-  *lookAxis = rightAxisY * LOOK_SIGN;
+  *moveAxis = rightAxisY * MOVE_SIGN;
+  *strafeAxis = rightAxisX * STRAFE_SIGN;
+  *turnAxis = leftAxisX * TURN_SIGN;
+  *lookAxis = leftAxisY * LOOK_SIGN;
 }
 
 // ============================================================
@@ -372,7 +372,7 @@ void updatePlayer(float dt) {
   lastLookAxis = lookAxis;
 
   float speedScale = 0.55f + (potRaw / 4095.0f) * 1.75f;
-  if (leftSWPressed) speedScale *= 1.65f;
+  if (rightSWPressed) speedScale *= 1.65f;
 
   float moveSpeed = 2.15f * speedScale;
   float turnSpeed = 2.20f;
@@ -595,12 +595,12 @@ void drawHud() {
 
   canvas.setCursor(5, 37);
   canvas.setTextColor(C_MUTED);
-  canvas.print(leftSWPressed ? "SPRINT" : "MOVE");
+  canvas.print(rightSWPressed ? "SPRINT" : "MOVE");
 
   canvas.fillRect(0, SCREEN_H - 11, SCREEN_W, 11, rgb565(8, 5, 5));
   canvas.setTextColor(C_MUTED);
   canvas.setCursor(3, SCREEN_H - 9);
-  canvas.print("L MOVE  R LOOK  A FIRE  B RESET");
+  canvas.print("R MOVE  L LOOK  A FIRE  B RESET");
 }
 
 void drawFrame() {
