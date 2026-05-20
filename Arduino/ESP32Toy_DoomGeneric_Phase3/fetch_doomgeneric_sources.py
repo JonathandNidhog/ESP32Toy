@@ -8,6 +8,8 @@ Why this exists:
   core C/H files from the official upstream repository on demand.
 - It intentionally skips desktop platform backends such as SDL/X11/Win32 and
   keeps ESP32Toy's own doomgeneric_esp32toy.cpp platform bridge.
+- After importing, it applies ESP32Toy-specific patch steps so the generated
+  sketch tree is closer to a board-flash, PSRAM-backed build immediately.
 
 Run from Windows PowerShell or a terminal:
     python fetch_doomgeneric_sources.py
@@ -25,11 +27,11 @@ from pathlib import Path
 from typing import Iterable
 
 API_DIR = "https://api.github.com/repos/ozkl/doomgeneric/contents/doomgeneric?ref=master"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.0"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.1"
 TARGET_DIR = Path(__file__).resolve().parent
 
 # C implementation files derived from upstream doomgeneric/Makefile's SRC_DOOM
-# list, excluding the desktop platform backend doomgeneric_xlib.c.  Headers are
+# list, excluding the desktop platform backend doomgeneric_xlib.c. Headers are
 # downloaded wholesale because they are lightweight and transitively included.
 CORE_C_FILES = {
     "dummy.c",
@@ -150,12 +152,88 @@ def patch_doomgeneric_h(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def patch_config_h(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text, count = re.subn(
+        r'#define\s+FILES_DIR\s+"[^"]*"',
+        '#define FILES_DIR "/littlefs"',
+        text,
+        count=1,
+    )
+    if count != 1:
+        raise RuntimeError("Could not patch FILES_DIR in config.h")
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_i_system_c(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+
+    include_anchor = "#include <string.h>\n"
+    include_patch = (
+        "#include <string.h>\n"
+        "\n"
+        "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n"
+        "#include <esp_heap_caps.h>\n"
+        "#endif\n"
+    )
+    if "#include <esp_heap_caps.h>" not in text:
+        if include_anchor not in text:
+            raise RuntimeError("Could not find include anchor in i_system.c")
+        text = text.replace(include_anchor, include_patch, 1)
+
+    old_alloc = "        zonemem = malloc(*size);"
+    new_alloc = (
+        "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n"
+        "        // Doom's large zone block should live in PSRAM on the ESP32-S3.\n"
+        "        // If PSRAM allocation fails, keep the upstream malloc fallback so\n"
+        "        // the failure path and error reporting remain intact.\n"
+        "        zonemem = heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n"
+        "        if (zonemem == NULL)\n"
+        "        {\n"
+        "            zonemem = malloc(*size);\n"
+        "        }\n"
+        "#else\n"
+        "        zonemem = malloc(*size);\n"
+        "#endif"
+    )
+    if "heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)" not in text:
+        if old_alloc not in text:
+            raise RuntimeError("Could not find zone malloc site in i_system.c")
+        text = text.replace(old_alloc, new_alloc, 1)
+
+    path.write_text(text, encoding="utf-8")
+
+
+def apply_esp32toy_patches() -> None:
+    doom_h = TARGET_DIR / "doomgeneric.h"
+    config_h = TARGET_DIR / "config.h"
+    i_system_c = TARGET_DIR / "i_system.c"
+
+    missing = [str(path.name) for path in (doom_h, config_h, i_system_c) if not path.exists()]
+    if missing:
+        raise RuntimeError(f"Patch target(s) missing after import: {', '.join(missing)}")
+
+    patch_doomgeneric_h(doom_h)
+    print("[PATCH] doomgeneric.h -> 160x128")
+
+    patch_config_h(config_h)
+    print('[PATCH] config.h -> FILES_DIR "/littlefs"')
+
+    patch_i_system_c(i_system_c)
+    print("[PATCH] i_system.c -> prefer PSRAM for Doom zone memory")
+
+
 def write_manifest(imported: Iterable[str]) -> None:
     manifest = TARGET_DIR / "UPSTREAM_IMPORT_MANIFEST.txt"
     lines = [
         "Imported from https://github.com/ozkl/doomgeneric/tree/master/doomgeneric",
         "Source selection: all headers + core C files from upstream Makefile,",
         "excluding desktop platform backends.",
+        "",
+        "ESP32Toy post-import patches:",
+        "- doomgeneric.h: framebuffer resolution changed to 160x128",
+        "- config.h: FILES_DIR changed to /littlefs",
+        "- i_system.c: Doom zone memory prefers ESP32 PSRAM via heap_caps_malloc",
         "",
         "Files:",
     ]
@@ -193,12 +271,10 @@ def main() -> int:
         (TARGET_DIR / name).write_bytes(data)
         imported.append(name)
 
-    doom_h = TARGET_DIR / "doomgeneric.h"
-    if doom_h.exists():
-        patch_doomgeneric_h(doom_h)
-        print("[PATCH] doomgeneric.h -> 160x128")
-    else:
-        print("[ERROR] doomgeneric.h was not imported", file=sys.stderr)
+    try:
+        apply_esp32toy_patches()
+    except RuntimeError as exc:
+        print(f"[ERROR] Patch stage failed: {exc}", file=sys.stderr)
         return 4
 
     write_manifest(imported)
@@ -208,8 +284,8 @@ def main() -> int:
     print(f"       {TARGET_DIR}")
     print(f"[INFO] Skipped {len(skipped)} non-core or desktop-specific files.")
     print("[NEXT] Open Phase3_entry.ino in Arduino IDE and compile.")
-    print("       The next integration pass will address WAD file loading and any")
-    print("       ESP32/Arduino compile differences reported by the IDE.")
+    print("       This imported tree is already patched for 160x128 output,")
+    print("       /littlefs IWAD discovery, and PSRAM-first zone allocation.")
     return 0
 
 
