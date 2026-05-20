@@ -92,11 +92,15 @@ const char WORLD[MAP_H][MAP_W + 1] = {
   "1111111111111111"
 };
 
+// IMPORTANT:
+// The previous prototype spawned at 2.5, 2.5, which is inside a wall cell
+// in the current map. That caused raycasts/collision to behave incorrectly.
+// This spawn is now in an actual open tile: WORLD[1][2] == '0'.
 float playerX = 2.5f;
-float playerY = 2.5f;
+float playerY = 1.5f;
 float playerA = 0.15f;
 const float START_X = 2.5f;
-const float START_Y = 2.5f;
+const float START_Y = 1.5f;
 const float START_A = 0.15f;
 
 int joyCenterX = 2048;
@@ -349,7 +353,6 @@ void renderRaycaster() {
     uint16_t wc = wallColorForCell(cell, perpDist, side);
     canvas.fillRect(sx, drawStart, COL_STEP, drawEnd - drawStart + 1, wc);
 
-    // Thin highlight near wall top for extra readability.
     if (drawStart > 0) canvas.drawFastHLine(sx, drawStart, COL_STEP, rgb565(245, 90, 70));
   }
 }
