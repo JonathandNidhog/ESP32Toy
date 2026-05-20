@@ -40,6 +40,9 @@
 #ifndef KEY_ESCAPE
 #define KEY_ESCAPE 27
 #endif
+#ifndef KEY_TAB
+#define KEY_TAB 9
+#endif
 #ifndef KEY_RSHIFT
 #define KEY_RSHIFT (0x80 + 0x36)
 #endif
@@ -57,7 +60,7 @@ extern "C" {
 #define TFT_BL   21
 #define TFT_RST  -1
 
-// ---------------- Existing hardware ----------------
+// ---------------- Existing / old right joystick hardware ----------------
 #define POT_PIN          1
 #define RIGHT_JOY_X_PIN 16
 #define RIGHT_JOY_Y_PIN  8
@@ -66,7 +69,7 @@ extern "C" {
 #define KEY_A_PIN       15
 #define KEY_B_PIN       14
 
-// ---------------- New left joystick ----------------
+// ---------------- New / left joystick hardware ----------------
 #define LEFT_JOY_X_PIN  17
 #define LEFT_JOY_Y_PIN  18
 #define LEFT_JOY_SW_PIN 13
@@ -96,9 +99,16 @@ static float axisLeftX = 0.0f;
 static float axisLeftY = 0.0f;
 
 static const float DEADZONE = 0.18f;
-static const float MOVE_SIGN = -1.0f;
+
+// Final control directions confirmed in the raycaster prototype:
+// - Old/right stick Y: move forward/backward, inverted in the latest test.
+// - Old/right stick X: strafe left/right.
+// - New/left stick X: turn camera left/right, inverted in the latest test.
+// - New/left stick Y is read/calibrated for future Doom-specific extensions,
+//   but vanilla Doom itself has no free vertical-look axis.
+static const float MOVE_SIGN = 1.0f;
 static const float STRAFE_SIGN = 1.0f;
-static const float TURN_SIGN = -1.0f;
+static const float TURN_SIGN = 1.0f;
 
 // ---------------- Digital event queue ----------------
 struct KeyEvent {
@@ -240,9 +250,9 @@ static void updateAnalogKeys() {
   axisLeftX = applyDeadzone(clampf((leftRawX - leftCenterX) / 1800.0f, -1.0f, 1.0f));
   axisLeftY = applyDeadzone(clampf((leftRawY - leftCenterY) / 1800.0f, -1.0f, 1.0f));
 
-  const float moveAxis = axisLeftY * MOVE_SIGN;
-  const float strafeAxis = axisLeftX * STRAFE_SIGN;
-  const float turnAxis = axisRightX * TURN_SIGN;
+  const float moveAxis = axisRightY * MOVE_SIGN;
+  const float strafeAxis = axisRightX * STRAFE_SIGN;
+  const float turnAxis = axisLeftX * TURN_SIGN;
 
   setDoomKey(KEY_UPARROW, moveAxis > 0.35f);
   setDoomKey(KEY_DOWNARROW, moveAxis < -0.35f);
@@ -250,6 +260,10 @@ static void updateAnalogKeys() {
   setDoomKey(KEY_STRAFE_L, strafeAxis < -0.35f);
   setDoomKey(KEY_RIGHTARROW, turnAxis > 0.35f);
   setDoomKey(KEY_LEFTARROW, turnAxis < -0.35f);
+
+  // Keep the new/left vertical axis sampled and calibrated even though
+  // the vanilla Doom keyboard API does not expose mouse-look pitch.
+  (void)axisLeftY;
 }
 
 static void updateDigitalKeys() {
@@ -258,10 +272,15 @@ static void updateDigitalKeys() {
   const bool rightSW = debouncedPressed(RIGHT_JOY_SW_PIN, &rightSWRawPrev, &rightSWStable, &rightSWChangedAt);
   const bool leftSW = debouncedPressed(LEFT_JOY_SW_PIN, &leftSWRawPrev, &leftSWStable, &leftSWChangedAt);
 
+  // DoomGeneric keyboard mapping for the ESP32Toy hardware:
+  //   A button          -> fire
+  //   B button          -> use / open door
+  //   Old/right SW      -> run modifier
+  //   New/left SW       -> automap toggle
   setDoomKey(KEY_FIRE, a);
   setDoomKey(KEY_USE, b);
-  setDoomKey(KEY_ESCAPE, rightSW);
-  setDoomKey(KEY_RSHIFT, leftSW);
+  setDoomKey(KEY_RSHIFT, rightSW);
+  setDoomKey(KEY_TAB, leftSW);
 
   static bool aPrev = false;
   if (a && !aPrev) {
@@ -316,9 +335,12 @@ void ESP32Toy_DoomPlatformInitHardware(void) {
   tft.fillScreen(ST77XX_BLACK);
 }
 
-void ESP32Toy_DoomPlatformAfterTick(void) {
+void ESP32Toy_DoomPlatformBeforeTick(void) {
   updateAnalogKeys();
   updateDigitalKeys();
+}
+
+void ESP32Toy_DoomPlatformAfterTick(void) {
   updateEffects();
 }
 
