@@ -6,7 +6,7 @@ static bool doomStarted = false;
 void setup() {
   ESP32Toy_DoomPlatformInitHardware();
 
-  if (!ESP32Toy_DoomPlatformHasIWAD()) {
+  if (!ESP32Toy_DoomPlatformReadyToStart()) {
     doomStarted = false;
     return;
   }
