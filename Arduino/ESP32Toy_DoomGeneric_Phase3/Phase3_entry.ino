@@ -9,6 +9,7 @@ void setup() {
 }
 
 void loop() {
+  ESP32Toy_DoomPlatformBeforeTick();
   doomgeneric_Tick();
   ESP32Toy_DoomPlatformAfterTick();
 }
