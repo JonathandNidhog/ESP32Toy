@@ -90,6 +90,7 @@ AudioPreset presets[] = {
 const int PRESET_COUNT = sizeof(presets) / sizeof(presets[0]);
 int presetIndex = 0;
 bool audioReady = false;
+bool audioDriverInstalled = false;
 char lastAction[32] = "Select + press A";
 
 bool aPrev = HIGH;
@@ -182,8 +183,14 @@ void drawScreen() {
 }
 
 void stopAudio() {
+  if (!audioDriverInstalled) {
+    audioReady = false;
+    return;
+  }
+
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_driver_uninstall(I2S_NUM_0);
+  audioDriverInstalled = false;
   audioReady = false;
 }
 
@@ -216,8 +223,11 @@ void initPreset() {
   pins.data_in_num = I2S_PIN_NO_CHANGE;
 
   esp_err_t a = i2s_driver_install(I2S_NUM_0, &config, 0, NULL);
-  esp_err_t b = i2s_set_pin(I2S_NUM_0, &pins);
-  esp_err_t c = i2s_zero_dma_buffer(I2S_NUM_0);
+  audioDriverInstalled = (a == ESP_OK);
+
+  esp_err_t b = audioDriverInstalled ? i2s_set_pin(I2S_NUM_0, &pins) : ESP_FAIL;
+  esp_err_t c = audioDriverInstalled ? i2s_zero_dma_buffer(I2S_NUM_0) : ESP_FAIL;
+
   audioReady = (a == ESP_OK && b == ESP_OK && c == ESP_OK);
   setLastAction(audioReady ? "Preset ready" : "Preset fail");
 }
