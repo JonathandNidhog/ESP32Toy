@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 API_DIR = "https://api.github.com/repos/ozkl/doomgeneric/contents/doomgeneric?ref=master"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.2"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.3"
 TARGET_DIR = Path(__file__).resolve().parent
 
 # C implementation files derived from upstream doomgeneric/Makefile's SRC_DOOM
@@ -204,12 +204,51 @@ def patch_i_system_c(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def patch_doomgeneric_c(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+
+    include_anchor = "#include <stdio.h>\n"
+    include_patch = (
+        "#include <stdio.h>\n"
+        "\n"
+        "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n"
+        "#include <esp_heap_caps.h>\n"
+        "#endif\n"
+    )
+    if "#include <esp_heap_caps.h>" not in text:
+        if include_anchor not in text:
+            raise RuntimeError("Could not find include anchor in doomgeneric.c")
+        text = text.replace(include_anchor, include_patch, 1)
+
+    old_alloc = "\tDG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);"
+    new_alloc = (
+        "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n"
+        "\t// Keep the 320x200 RGBA Doom framebuffer out of scarce internal RAM.\n"
+        "\tDG_ScreenBuffer = heap_caps_malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4,\n"
+        "\t                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n"
+        "\tif (DG_ScreenBuffer == NULL)\n"
+        "\t{\n"
+        "\t\tDG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);\n"
+        "\t}\n"
+        "#else\n"
+        "\tDG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);\n"
+        "#endif"
+    )
+    if "heap_caps_malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4" not in text:
+        if old_alloc not in text:
+            raise RuntimeError("Could not find framebuffer malloc site in doomgeneric.c")
+        text = text.replace(old_alloc, new_alloc, 1)
+
+    path.write_text(text, encoding="utf-8")
+
+
 def apply_esp32toy_patches() -> None:
     doom_h = TARGET_DIR / "doomgeneric.h"
     config_h = TARGET_DIR / "config.h"
     i_system_c = TARGET_DIR / "i_system.c"
+    doomgeneric_c = TARGET_DIR / "doomgeneric.c"
 
-    missing = [str(path.name) for path in (doom_h, config_h, i_system_c) if not path.exists()]
+    missing = [str(path.name) for path in (doom_h, config_h, i_system_c, doomgeneric_c) if not path.exists()]
     if missing:
         raise RuntimeError(f"Patch target(s) missing after import: {', '.join(missing)}")
 
@@ -221,6 +260,9 @@ def apply_esp32toy_patches() -> None:
 
     patch_i_system_c(i_system_c)
     print("[PATCH] i_system.c -> prefer PSRAM for Doom zone memory")
+
+    patch_doomgeneric_c(doomgeneric_c)
+    print("[PATCH] doomgeneric.c -> prefer PSRAM for Doom framebuffer")
 
 
 def write_manifest(imported: Iterable[str]) -> None:
@@ -235,6 +277,7 @@ def write_manifest(imported: Iterable[str]) -> None:
         "- platform bridge: downsamples 320x200 to the 160x128 ST7735 panel",
         "- config.h: FILES_DIR changed to /littlefs",
         "- i_system.c: Doom zone memory prefers ESP32 PSRAM via heap_caps_malloc",
+        "- doomgeneric.c: Doom framebuffer prefers ESP32 PSRAM via heap_caps_malloc",
         "",
         "Files:",
     ]
@@ -286,7 +329,7 @@ def main() -> int:
     print(f"[INFO] Skipped {len(skipped)} non-core or desktop-specific files.")
     print("[NEXT] Open Phase3_entry.ino in Arduino IDE and compile.")
     print("       This imported tree is already patched for classic 320x200 Doom")
-    print("       rendering, /littlefs IWAD discovery, and PSRAM-first zone allocation.")
+    print("       rendering, /littlefs IWAD discovery, and PSRAM-first zone/framebuffer allocation.")
     return 0
 
 
