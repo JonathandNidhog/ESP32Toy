@@ -1,1 +1,0 @@
-Next integration target: IO14 B key, IO47 RGB LED, I2S audio pins, Doom menu placeholder.
