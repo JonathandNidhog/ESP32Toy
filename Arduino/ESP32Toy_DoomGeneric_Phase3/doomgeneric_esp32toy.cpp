@@ -11,11 +11,14 @@
 #include "doomgeneric_esp32toy.h"
 
 // DoomGeneric symbols provided by upstream engine sources.
+// Keep the classic internal Doom framebuffer.  The ST7735 presentation layer
+// downsamples this 320x200 buffer to a 160x120 4:3 image with 4-pixel bars on
+// the 160x128 panel.
 #ifndef DOOMGENERIC_RESX
-#define DOOMGENERIC_RESX 160
+#define DOOMGENERIC_RESX 320
 #endif
 #ifndef DOOMGENERIC_RESY
-#define DOOMGENERIC_RESY 128
+#define DOOMGENERIC_RESY 200
 #endif
 
 #ifndef KEY_RIGHTARROW
@@ -86,6 +89,18 @@ extern "C" {
 #define MOTOR_ACTIVE_HIGH true
 #define TFT_ROTATION 3
 
+// Physical ST7735 panel size in current landscape orientation.
+static const int kPanelWidth = 160;
+static const int kPanelHeight = 128;
+
+// Doom presentation target on the panel.
+// 160x120 preserves the intended 4:3 Doom display better than stretching raw
+// 320x200 directly into 160x128, while leaving only thin 4px bars above/below.
+static const int kDoomPresentWidth = 160;
+static const int kDoomPresentHeight = 120;
+static const int kDoomPresentX = 0;
+static const int kDoomPresentY = 4;
+
 // LittleFS is mounted at /littlefs by Arduino-ESP32's official wrapper.
 static const char *kLittleFSBasePath = "/littlefs";
 static const char *kIWADRelativePath = "/doom1.wad";
@@ -96,7 +111,8 @@ SPIClass screenSPI(FSPI);
 Adafruit_ST7735 tft(&screenSPI, TFT_CS, TFT_DC, TFT_RST);
 Adafruit_NeoPixel leds(RGB_COUNT, RGB_PIN, NEO_GRB + NEO_KHZ800);
 
-static uint16_t line565[DOOMGENERIC_RESX];
+// One physical ST7735 scanline after downsampling.
+static uint16_t line565[kDoomPresentWidth];
 
 // ---------------- Input calibration ----------------
 static int rightCenterX = 2048;
@@ -116,7 +132,7 @@ static const float DEADZONE = 0.18f;
 // - Old/right stick X: strafe left/right.
 // - New/left stick X: turn camera left/right, inverted in the latest test.
 // - New/left stick Y is read/calibrated for future Doom-specific extensions,
-//   but vanilla Doom itself has no free vertical-look axis.
+//   but vanilla Doom itself has no free vertical-look keyboard axis.
 static const float MOVE_SIGN = 1.0f;
 static const float STRAFE_SIGN = 1.0f;
 static const float TURN_SIGN = 1.0f;
@@ -262,7 +278,7 @@ static void drawCenteredLine(int y, const char *text, uint16_t color) {
   tft.setTextColor(color);
   tft.setTextSize(1);
   const int textWidth = (int)strlen(text) * 6;
-  int x = (160 - textWidth) / 2;
+  int x = (kPanelWidth - textWidth) / 2;
   if (x < 0) x = 0;
   tft.setCursor(x, y);
   tft.print(text);
@@ -387,7 +403,7 @@ static void updateDigitalKeys() {
 }
 
 static uint16_t doomPixelTo565(uint32_t p) {
-  // DoomGeneric non-CMAP256 builds generally expose 0xAARRGGBB-like 32-bit pixels.
+  // DoomGeneric non-CMAP256 builds expose 0xAARRGGBB-like 32-bit pixels.
   // We only need RGB for ST7735.
   const uint8_t r = (uint8_t)((p >> 16) & 0xFF);
   const uint8_t g = (uint8_t)((p >> 8) & 0xFF);
@@ -479,17 +495,30 @@ const char *ESP32Toy_DoomPlatformIWADPath(void) {
 
 extern "C" void DG_Init(void) {
   // Hardware is initialized by Arduino setup before doomgeneric_Create().
+  // The thin top/bottom presentation bars remain black for the Doom runtime.
+  tft.fillRect(0, 0, kPanelWidth, kDoomPresentY, ST77XX_BLACK);
+  tft.fillRect(0, kDoomPresentY + kDoomPresentHeight, kPanelWidth,
+               kPanelHeight - (kDoomPresentY + kDoomPresentHeight), ST77XX_BLACK);
 }
 
 extern "C" void DG_DrawFrame(void) {
   if (!DG_ScreenBuffer) return;
 
-  for (int y = 0; y < DOOMGENERIC_RESY; ++y) {
-    const int row = y * DOOMGENERIC_RESX;
-    for (int x = 0; x < DOOMGENERIC_RESX; ++x) {
-      line565[x] = doomPixelTo565(DG_ScreenBuffer[row + x]);
+  // Downsample classic Doom 320x200 -> 160x120.
+  // X is a cheap 2:1 sample. Y uses integer mapping to stretch the classic
+  // 320x200 source to the intended 4:3 presentation ratio before sending it to
+  // the 160x128 ST7735 panel.
+  for (int dstY = 0; dstY < kDoomPresentHeight; ++dstY) {
+    const int srcY = (dstY * DOOMGENERIC_RESY) / kDoomPresentHeight;
+    const int srcRow = srcY * DOOMGENERIC_RESX;
+
+    for (int dstX = 0; dstX < kDoomPresentWidth; ++dstX) {
+      const int srcX = (dstX * DOOMGENERIC_RESX) / kDoomPresentWidth;
+      line565[dstX] = doomPixelTo565(DG_ScreenBuffer[srcRow + srcX]);
     }
-    tft.drawRGBBitmap(0, y, line565, DOOMGENERIC_RESX, 1);
+
+    tft.drawRGBBitmap(kDoomPresentX, kDoomPresentY + dstY, line565,
+                      kDoomPresentWidth, 1);
   }
 }
 
