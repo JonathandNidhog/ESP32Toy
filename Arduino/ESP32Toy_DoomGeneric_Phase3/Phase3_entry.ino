@@ -14,9 +14,10 @@ void setup() {
   static char arg0[] = "esp32toy";
   static char arg1[] = "-iwad";
   static char arg2[] = "/littlefs/doom1.wad";
-  static char *argv[] = { arg0, arg1, arg2 };
+  static char arg3[] = "-nosound";
+  static char *argv[] = { arg0, arg1, arg2, arg3 };
 
-  doomgeneric_Create(3, argv);
+  doomgeneric_Create(4, argv);
   doomStarted = true;
 }
 
