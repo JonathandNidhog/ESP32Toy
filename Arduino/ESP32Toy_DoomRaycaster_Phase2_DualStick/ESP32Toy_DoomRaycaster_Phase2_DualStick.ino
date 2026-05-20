@@ -23,18 +23,13 @@
 //   New stick UP/DOWN    -> move forward / backward
 //   New stick LEFT/RIGHT -> strafe left / right
 //   Old stick LEFT/RIGHT -> turn camera left / right
+//   Old stick UP/DOWN    -> smooth vertical look / horizon shift
 //   A key IO15           -> fire test + motor pulse + muzzle flash
 //   B key IO14           -> reset player position
 //   Old joystick SW IO6  -> toggle minimap
 //   New joystick SW IO13 -> sprint while held
 //   Pot IO1              -> base move speed scale
 //   RGB IO47             -> red Doom pulse / muzzle flash
-//
-// IMPORTANT FIX IN THIS BUILD:
-//   - Game controls now use RAW joystick axes directly.
-//   - No screen-rotation remap is applied to gameplay axes.
-//   - This fixes old joystick left/right turn not responding.
-//   - A fire input also has a robust press fallback and debug indicator.
 // ============================================================
 
 // ---------------- Display pins ----------------
@@ -167,16 +162,18 @@ float leftAxisY = 0.0f;
 float lastMoveAxis = 0.0f;
 float lastStrafeAxis = 0.0f;
 float lastTurnAxis = 0.0f;
+float lastLookAxis = 0.0f;
 
-// Direction knobs. These are now tied to RAW physical axes.
-// Current guess:
-//   new stick Y up/down    -> movement
-//   new stick X left/right -> strafe
-//   old stick X left/right -> turn
-// If one direction is reversed after testing, only flip the sign below.
+// Direction knobs tied to RAW physical axes.
 const float MOVE_SIGN = -1.0f;
 const float STRAFE_SIGN = 1.0f;
 const float TURN_SIGN = 1.0f;
+const float LOOK_SIGN = -1.0f;
+
+// Fake vertical look state. This is a classic raycaster-style horizon shift,
+// not true 3D pitch, but it makes the right-stick Y direction meaningful.
+float lookPitchPixels = 0.0f;
+const float LOOK_PITCH_MAX = 18.0f;
 
 bool keyAPrevRaw = HIGH;
 bool keyBPrevRaw = HIGH;
@@ -309,8 +306,6 @@ void updateInputs() {
     fireNow();
   }
 
-  // Fallback: if the edge is somehow missed, a held A key still produces
-  // a clearly visible test shot every 220 ms. This makes hardware diagnosis obvious.
   if (keyARawPressed && millis() - lastFireMs > 220) {
     fireNow();
   }
@@ -319,6 +314,7 @@ void updateInputs() {
     playerX = START_X;
     playerY = START_Y;
     playerA = START_A;
+    lookPitchPixels = 0.0f;
     motorPulse(110);
   }
 
@@ -328,7 +324,7 @@ void updateInputs() {
   }
 }
 
-void readDualStickAxes(float *moveAxis, float *strafeAxis, float *turnAxis) {
+void readDualStickAxes(float *moveAxis, float *strafeAxis, float *turnAxis, float *lookAxis) {
   rightAxisX = clampf((rightRawX - rightCenterX) / 1800.0f, -1.0f, 1.0f);
   rightAxisY = clampf((rightRawY - rightCenterY) / 1800.0f, -1.0f, 1.0f);
   leftAxisX = clampf((leftRawX - leftCenterX) / 1800.0f, -1.0f, 1.0f);
@@ -339,10 +335,10 @@ void readDualStickAxes(float *moveAxis, float *strafeAxis, float *turnAxis) {
   leftAxisX = applyDeadzone(leftAxisX, 0.14f);
   leftAxisY = applyDeadzone(leftAxisY, 0.14f);
 
-  // RAW joystick axes, no display-rotation swap.
   *moveAxis = leftAxisY * MOVE_SIGN;
   *strafeAxis = leftAxisX * STRAFE_SIGN;
   *turnAxis = rightAxisX * TURN_SIGN;
+  *lookAxis = rightAxisY * LOOK_SIGN;
 }
 
 // ============================================================
@@ -367,11 +363,13 @@ void updatePlayer(float dt) {
   float moveAxis = 0.0f;
   float strafeAxis = 0.0f;
   float turnAxis = 0.0f;
-  readDualStickAxes(&moveAxis, &strafeAxis, &turnAxis);
+  float lookAxis = 0.0f;
+  readDualStickAxes(&moveAxis, &strafeAxis, &turnAxis, &lookAxis);
 
   lastMoveAxis = moveAxis;
   lastStrafeAxis = strafeAxis;
   lastTurnAxis = turnAxis;
+  lastLookAxis = lookAxis;
 
   float speedScale = 0.55f + (potRaw / 4095.0f) * 1.75f;
   if (leftSWPressed) speedScale *= 1.65f;
@@ -382,6 +380,10 @@ void updatePlayer(float dt) {
   playerA += turnAxis * turnSpeed * dt;
   if (playerA < -PI) playerA += 2.0f * PI;
   if (playerA > PI) playerA -= 2.0f * PI;
+
+  float targetPitch = lookAxis * LOOK_PITCH_MAX;
+  float pitchBlend = clampf(dt * 10.0f, 0.0f, 1.0f);
+  lookPitchPixels += (targetPitch - lookPitchPixels) * pitchBlend;
 
   float forwardX = cosf(playerA);
   float forwardY = sinf(playerA);
@@ -403,17 +405,28 @@ uint16_t wallColor(float dist, bool side) {
   return rgb565((uint8_t)(170 * shade), (uint8_t)(35 * shade), (uint8_t)(26 * shade));
 }
 
+int currentHorizonY() {
+  int horizon = SCREEN_H / 2 + (int)lookPitchPixels;
+  if (horizon < 18) horizon = 18;
+  if (horizon > SCREEN_H - 18) horizon = SCREEN_H - 18;
+  return horizon;
+}
+
 void drawBackground() {
-  for (int y = 0; y < SCREEN_H / 2; y++) {
-    float t = y / (float)(SCREEN_H / 2);
+  int horizon = currentHorizonY();
+
+  for (int y = 0; y < horizon; y++) {
+    float denom = horizon > 0 ? (float)horizon : 1.0f;
+    float t = y / denom;
     uint8_t r = (uint8_t)(15 + 15 * t);
     uint8_t g = (uint8_t)(18 + 4 * t);
     uint8_t b = (uint8_t)(30 - 8 * t);
     canvas.drawFastHLine(0, y, SCREEN_W, rgb565(r, g, b));
   }
 
-  for (int y = SCREEN_H / 2; y < SCREEN_H; y++) {
-    float t = (y - SCREEN_H / 2) / (float)(SCREEN_H / 2);
+  for (int y = horizon; y < SCREEN_H; y++) {
+    float denom = SCREEN_H - horizon > 0 ? (float)(SCREEN_H - horizon) : 1.0f;
+    float t = (y - horizon) / denom;
     uint8_t r = (uint8_t)(28 - 20 * t);
     uint8_t g = (uint8_t)(18 - 11 * t);
     uint8_t b = (uint8_t)(14 - 6 * t);
@@ -424,6 +437,7 @@ void drawBackground() {
 void renderRaycaster() {
   const float FOV = 1.05f;
   const int COL_STEP = 2;
+  int horizon = currentHorizonY();
 
   for (int sx = 0; sx < SCREEN_W; sx += COL_STEP) {
     float cameraX = 2.0f * (sx / (float)SCREEN_W) - 1.0f;
@@ -485,8 +499,8 @@ void renderRaycaster() {
     if (perpDist < 0.05f) perpDist = 0.05f;
 
     int lineH = (int)(SCREEN_H / perpDist);
-    int drawStart = -lineH / 2 + SCREEN_H / 2;
-    int drawEnd = lineH / 2 + SCREEN_H / 2;
+    int drawStart = -lineH / 2 + horizon;
+    int drawEnd = lineH / 2 + horizon;
     if (drawStart < 0) drawStart = 0;
     if (drawEnd >= SCREEN_H) drawEnd = SCREEN_H - 1;
 
@@ -498,7 +512,7 @@ void renderRaycaster() {
 
 void drawCrosshair() {
   int cx = SCREEN_W / 2;
-  int cy = SCREEN_H / 2;
+  int cy = currentHorizonY();
   canvas.drawFastHLine(cx - 5, cy, 11, C_CROSS);
   canvas.drawFastVLine(cx, cy - 5, 11, C_CROSS);
   canvas.drawPixel(cx, cy, C_RED);
@@ -543,13 +557,13 @@ void drawMinimap() {
 }
 
 void drawHud() {
-  canvas.fillRect(0, 0, 124, 35, C_HUD);
+  canvas.fillRect(0, 0, 132, 43, C_HUD);
   canvas.setTextSize(1);
   canvas.setTextWrap(false);
 
   canvas.setTextColor(C_WHITE);
   canvas.setCursor(5, 4);
-  canvas.print("DOOM P2 RAW AXIS");
+  canvas.print("DOOM P2 LOOK Y");
 
   canvas.setTextColor(C_MUTED);
   canvas.setCursor(5, 13);
@@ -559,6 +573,8 @@ void drawHud() {
   canvas.print(lastStrafeAxis, 1);
   canvas.print(" T");
   canvas.print(lastTurnAxis, 1);
+  canvas.print(" L");
+  canvas.print(lastLookAxis, 1);
 
   canvas.setCursor(5, 21);
   canvas.print("LX");
@@ -569,15 +585,22 @@ void drawHud() {
   canvas.print(rightAxisX, 1);
 
   canvas.setCursor(5, 29);
+  canvas.print("RY");
+  canvas.print(rightAxisY, 1);
+  canvas.print(" P");
+  canvas.print((int)lookPitchPixels);
+  canvas.print(" ");
   canvas.setTextColor(keyARawPressed ? C_GREEN : C_MUTED);
   canvas.print(keyARawPressed ? "A:DOWN" : "A:UP");
+
+  canvas.setCursor(5, 37);
   canvas.setTextColor(C_MUTED);
-  canvas.print(leftSWPressed ? " SPRINT" : " MOVE");
+  canvas.print(leftSWPressed ? "SPRINT" : "MOVE");
 
   canvas.fillRect(0, SCREEN_H - 11, SCREEN_W, 11, rgb565(8, 5, 5));
   canvas.setTextColor(C_MUTED);
   canvas.setCursor(3, SCREEN_H - 9);
-  canvas.print("L MOVE  R TURN  A FIRE  B RESET");
+  canvas.print("L MOVE  R LOOK  A FIRE  B RESET");
 }
 
 void drawFrame() {
@@ -602,8 +625,8 @@ void drawBoot() {
   canvas.print("DOOM PHASE 2");
   canvas.setTextSize(1);
   canvas.setTextColor(C_MUTED);
-  canvas.setCursor(22, 61);
-  canvas.print("RAW DUAL-STICK CONTROL");
+  canvas.setCursor(23, 61);
+  canvas.print("DUAL STICK + LOOK Y");
   canvas.setCursor(25, 77);
   canvas.print("KEEP BOTH STICKS CENTERED");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_W, SCREEN_H);
