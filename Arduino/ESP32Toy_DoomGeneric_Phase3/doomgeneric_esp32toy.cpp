@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include "FS.h"
+#include <LittleFS.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <Adafruit_NeoPixel.h>
@@ -81,6 +83,12 @@ extern "C" {
 #define MOTOR_ACTIVE_HIGH true
 #define TFT_ROTATION 3
 
+// LittleFS is mounted at /littlefs by Arduino-ESP32's official wrapper.
+static const char *kLittleFSBasePath = "/littlefs";
+static const char *kIWADRelativePath = "/doom1.wad";
+static const char *kIWADPosixPath = "/littlefs/doom1.wad";
+static const bool kFormatLittleFSIfMountFails = false;
+
 SPIClass screenSPI(FSPI);
 Adafruit_ST7735 tft(&screenSPI, TFT_CS, TFT_DC, TFT_RST);
 Adafruit_NeoPixel leds(RGB_COUNT, RGB_PIN, NEO_GRB + NEO_KHZ800);
@@ -140,6 +148,13 @@ static uint32_t motorUntilMs = 0;
 static uint32_t flashUntilMs = 0;
 static uint32_t lastLedMs = 0;
 static uint8_t ledPhase = 0;
+
+// ---------------- Board flash / IWAD boot state ----------------
+static bool littleFSMounted = false;
+static bool iwadPresent = false;
+static size_t iwadBytes = 0;
+static uint32_t idleBlinkAtMs = 0;
+static bool idleLedOn = false;
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -239,6 +254,75 @@ static void calibrateJoysticks() {
   leftCenterY = ly / 72;
 }
 
+static void drawCenteredLine(int y, const char *text, uint16_t color) {
+  tft.setTextColor(color);
+  tft.setTextSize(1);
+  const int textWidth = (int)strlen(text) * 6;
+  int x = (160 - textWidth) / 2;
+  if (x < 0) x = 0;
+  tft.setCursor(x, y);
+  tft.print(text);
+}
+
+static void drawBootHeader(void) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextWrap(false);
+  tft.setTextSize(2);
+  tft.setTextColor(rgb565(220, 40, 28));
+  tft.setCursor(22, 22);
+  tft.print("DOOM BOOT");
+  tft.drawFastHLine(12, 46, 136, rgb565(120, 24, 18));
+}
+
+static void drawMissingIWADScreen(void) {
+  drawBootHeader();
+  drawCenteredLine(58, littleFSMounted ? "BOARD FLASH READY" : "LITTLEFS MOUNT FAILED", littleFSMounted ? ST77XX_GREEN : ST77XX_RED);
+  drawCenteredLine(72, "MISSING: doom1.wad", ST77XX_YELLOW);
+  drawCenteredLine(86, "UPLOAD TO LITTLEFS /", ST77XX_WHITE);
+  drawCenteredLine(100, "EXPECTED: /doom1.wad", rgb565(170, 170, 170));
+}
+
+static void drawFoundIWADScreen(void) {
+  char sizeLine[32];
+  snprintf(sizeLine, sizeof(sizeLine), "WAD OK: %lu KB", (unsigned long)(iwadBytes / 1024UL));
+  drawBootHeader();
+  drawCenteredLine(58, "BOARD FLASH LITTLEFS OK", ST77XX_GREEN);
+  drawCenteredLine(72, sizeLine, ST77XX_WHITE);
+  drawCenteredLine(86, "STARTING DOOM...", ST77XX_YELLOW);
+}
+
+static void mountLittleFSAndFindIWAD(void) {
+  littleFSMounted = LittleFS.begin(kFormatLittleFSIfMountFails, kLittleFSBasePath, 10, "spiffs");
+  if (!littleFSMounted) {
+    Serial.println("[ESP32Toy Doom] LittleFS mount failed.");
+    iwadPresent = false;
+    iwadBytes = 0;
+    drawMissingIWADScreen();
+    return;
+  }
+
+  Serial.printf("[ESP32Toy Doom] LittleFS mounted. total=%lu used=%lu\n", (unsigned long)LittleFS.totalBytes(), (unsigned long)LittleFS.usedBytes());
+
+  File wad = LittleFS.open(kIWADRelativePath, FILE_READ);
+  if (!wad || wad.isDirectory()) {
+    Serial.printf("[ESP32Toy Doom] IWAD missing: %s\n", kIWADRelativePath);
+    iwadPresent = false;
+    iwadBytes = 0;
+    drawMissingIWADScreen();
+    if (wad) wad.close();
+    return;
+  }
+
+  iwadBytes = wad.size();
+  iwadPresent = iwadBytes > 0;
+  wad.close();
+
+  Serial.printf("[ESP32Toy Doom] IWAD found: %s (%lu bytes)\n", kIWADRelativePath, (unsigned long)iwadBytes);
+  drawFoundIWADScreen();
+  delay(550);
+  tft.fillScreen(ST77XX_BLACK);
+}
+
 static void updateAnalogKeys() {
   const int rightRawX = analogRead(RIGHT_JOY_X_PIN);
   const int rightRawY = analogRead(RIGHT_JOY_Y_PIN);
@@ -300,6 +384,9 @@ static uint16_t doomPixelTo565(uint32_t p) {
 }
 
 void ESP32Toy_DoomPlatformInitHardware(void) {
+  Serial.begin(115200);
+  delay(120);
+
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
 
@@ -324,15 +411,10 @@ void ESP32Toy_DoomPlatformInitHardware(void) {
   tft.setRotation(TFT_ROTATION);
   tft.fillScreen(ST77XX_BLACK);
 
-  tft.setTextWrap(false);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(15, 44);
-  tft.print("DOOMGENERIC BOOT");
-  tft.setCursor(18, 61);
-  tft.print("CALIBRATING STICKS");
+  drawBootHeader();
+  drawCenteredLine(58, "CALIBRATING STICKS", ST77XX_WHITE);
   calibrateJoysticks();
-  tft.fillScreen(ST77XX_BLACK);
+  mountLittleFSAndFindIWAD();
 }
 
 void ESP32Toy_DoomPlatformBeforeTick(void) {
@@ -342,6 +424,28 @@ void ESP32Toy_DoomPlatformBeforeTick(void) {
 
 void ESP32Toy_DoomPlatformAfterTick(void) {
   updateEffects();
+}
+
+void ESP32Toy_DoomPlatformIdle(void) {
+  updateEffects();
+
+  const uint32_t now = millis();
+  if (now - idleBlinkAtMs < 450) return;
+  idleBlinkAtMs = now;
+  idleLedOn = !idleLedOn;
+  if (idleLedOn) {
+    ledAll(45, 6, 0);
+  } else {
+    ledAll(0, 0, 0);
+  }
+}
+
+bool ESP32Toy_DoomPlatformHasIWAD(void) {
+  return littleFSMounted && iwadPresent;
+}
+
+const char *ESP32Toy_DoomPlatformIWADPath(void) {
+  return kIWADPosixPath;
 }
 
 extern "C" void DG_Init(void) {
