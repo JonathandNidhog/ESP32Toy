@@ -17,6 +17,7 @@ Tracked in this folder now:
 - `doomgeneric_esp32toy.cpp`
 - `fetch_doomgeneric_sources.py`
 - `partitions.csv`
+- `data/PUT_DOOM1_WAD_HERE.txt`
 
 The ESP32Toy platform bridge already implements the DoomGeneric callbacks:
 - `DG_Init`
@@ -32,9 +33,10 @@ It also already provides:
 - Joystick calibration at boot
 - RGB muzzle flash and vibration pulse on fire
 - Input processing before each Doom engine tick for lower control latency
+- PSRAM detection before Doom startup
 - LittleFS mounting from onboard flash
 - `/doom1.wad` existence check before Doom starts
-- On-screen boot error if the WAD file has not been uploaded yet
+- On-screen boot errors for missing PSRAM or missing WAD file
 
 ## Final control mapping currently wired for real Doom
 
@@ -64,15 +66,43 @@ The current boot sketch starts DoomGeneric with:
 
 Arduino-ESP32 mounts LittleFS at `/littlefs`, while files uploaded into the LittleFS image appear inside the filesystem root. Therefore:
 
-- File to upload into LittleFS: `doom1.wad`
-- Runtime DoomGeneric path: `/littlefs/doom1.wad`
+- Local file to place in the sketch data folder: `data/doom1.wad`
+- Filesystem-visible path inside LittleFS: `/doom1.wad`
+- Runtime DoomGeneric POSIX path: `/littlefs/doom1.wad`
 
-If the file is missing, the screen shows:
+The repo now includes:
+
+```text
+data/PUT_DOOM1_WAD_HERE.txt
+```
+
+as a placeholder so the upload location is unambiguous.
+
+## Startup gate screens
+
+Doom is only started when both conditions are true:
+
+1. **PSRAM is detected** through Arduino-ESP32's PSRAM API.
+2. **`doom1.wad` exists** in LittleFS.
+
+If PSRAM is not available, the screen shows:
+
+- `PSRAM NOT FOUND`
+- `ENABLE PSRAM IN IDE`
+- `DOOM BOOT IS BLOCKED`
+
+If the WAD file is missing, the screen shows:
 
 - `BOARD FLASH READY`
 - `MISSING: doom1.wad`
 - `UPLOAD TO LITTLEFS /`
 - `EXPECTED: /doom1.wad`
+
+If both are present, the screen shows:
+
+- `PSRAM + FLASH OK`
+- `WAD OK: ... KB`
+- `STARTING DOOM...`
 
 ## Flash partition layout
 
@@ -84,12 +114,12 @@ Current layout for the 16 MB flash board:
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x5000,
 otadata,  data, ota,     0xe000,  0x2000,
-app0,     app,  ota_0,   0x10000, 0x600000,
-app1,     app,  ota_1,           ,0x600000,
-spiffs,   data, spiffs,          ,0x3E0000,
+app0,     app,  ota_0,   0x10000, 0x580000,
+app1,     app,  ota_1,           ,0x580000,
+spiffs,   data, spiffs,          ,0x4E0000,
 ```
 
-The final `spiffs`-labeled data partition is used by Arduino-ESP32's LittleFS wrapper. It gives roughly **3.875 MB** of board-flash filesystem storage for `doom1.wad` and related files.
+The final `spiffs`-labeled data partition is used by Arduino-ESP32's LittleFS wrapper. It gives roughly **4.875 MiB** of board-flash filesystem storage for `doom1.wad` and related files.
 
 ## Upstream DoomGeneric core import
 
@@ -99,7 +129,11 @@ The platform bridge is committed directly in this repo. The upstream DoomGeneric
 python fetch_doomgeneric_sources.py
 ```
 
-That script downloads the official upstream DoomGeneric core C/H files into this sketch folder, skips desktop platform backends, and patches `doomgeneric.h` to use `160x128`.
+That script downloads the official upstream DoomGeneric core C/H files into this sketch folder, skips desktop platform backends, and now also applies ESP32Toy-specific patches:
+
+- `doomgeneric.h` -> framebuffer resolution changed to `160x128`
+- `config.h` -> `FILES_DIR` changed to `/littlefs`
+- `i_system.c` -> Doom's large zone-memory allocation prefers PSRAM via `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` and falls back to `malloc()` only if needed
 
 The bridge is already written against the official DoomGeneric interface in `doomgeneric.h`, where DoomGeneric exposes the framebuffer pointer, create/tick entry points, and the platform callback contract.
 
@@ -111,7 +145,7 @@ Once the upstream core compiles, the local user-side steps are:
    - `data/doom1.wad`
 2. Upload the LittleFS filesystem image to the board using an Arduino-ESP32 LittleFS upload workflow.
 3. Flash the sketch.
-4. Boot the board. If the WAD is present, it proceeds to Doom startup; if not, it stays on the missing-WAD screen.
+4. Boot the board. If PSRAM and WAD are present, it proceeds to Doom startup; otherwise it stays on the matching diagnostic screen.
 
 ## Next compile target
 
