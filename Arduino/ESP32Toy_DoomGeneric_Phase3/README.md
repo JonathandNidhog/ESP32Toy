@@ -1,6 +1,9 @@
 # ESP32Toy DoomGeneric Phase 3
 
-This folder is the active **real DOOM** integration path for ESP32Toy.
+This folder is the active **Doom Runtime** integration path for ESP32Toy.
+It is **not** intended to replace LiquidOS. LiquidOS remains the main system;
+this Doom build is a heavy runtime that will later be launched from the main
+system and can reboot back to it.
 
 Target hardware:
 - ESP32-S3 N16R8
@@ -28,7 +31,9 @@ The ESP32Toy platform bridge already implements the DoomGeneric callbacks:
 - `DG_SetWindowTitle`
 
 It also already provides:
-- ST7735 framebuffer conversion from DoomGeneric's screen buffer to RGB565 scanlines
+- Classic internal Doom framebuffer path kept at **320x200**
+- ESP32Toy presentation downsample from **320x200 -> 160x120**
+- 160x120 Doom image letterboxed inside the 160x128 ST7735 panel with 4 px top/bottom bars
 - Digital Doom key event queue
 - Joystick calibration at boot
 - RGB muzzle flash and vibration pulse on fire
@@ -37,6 +42,7 @@ It also already provides:
 - LittleFS mounting from onboard flash
 - `/doom1.wad` existence check before Doom starts
 - On-screen boot errors for missing PSRAM or missing WAD file
+- Runtime starts Doom with `-nosound` because this hardware path currently has no audio output
 
 ## Final control mapping currently wired for real Doom
 
@@ -61,7 +67,7 @@ These match the latest validated hardware direction fixes from the raycaster pro
 The current boot sketch starts DoomGeneric with:
 
 ```cpp
--iwad /littlefs/doom1.wad
+-iwad /littlefs/doom1.wad -nosound
 ```
 
 Arduino-ESP32 mounts LittleFS at `/littlefs`, while files uploaded into the LittleFS image appear inside the filesystem root. Therefore:
@@ -121,6 +127,8 @@ spiffs,   data, spiffs,          ,0x4E0000,
 
 The final `spiffs`-labeled data partition is used by Arduino-ESP32's LittleFS wrapper. It gives roughly **4.875 MiB** of board-flash filesystem storage for `doom1.wad` and related files.
 
+This partitioning is still considered **provisional** until the LiquidOS main-system binary size, Doom Runtime binary size, and future voice-model storage plan are measured.
+
 ## Upstream DoomGeneric core import
 
 The platform bridge is committed directly in this repo. The upstream DoomGeneric C/H engine files are still imported using:
@@ -129,11 +137,12 @@ The platform bridge is committed directly in this repo. The upstream DoomGeneric
 python fetch_doomgeneric_sources.py
 ```
 
-That script downloads the official upstream DoomGeneric core C/H files into this sketch folder, skips desktop platform backends, and now also applies ESP32Toy-specific patches:
+That script downloads the official upstream DoomGeneric core C/H files into this sketch folder, skips desktop platform backends, and applies ESP32Toy-specific patches:
 
-- `doomgeneric.h` -> framebuffer resolution changed to `160x128`
+- `doomgeneric.h` -> internal Doom framebuffer kept at classic `320x200`
 - `config.h` -> `FILES_DIR` changed to `/littlefs`
 - `i_system.c` -> Doom's large zone-memory allocation prefers PSRAM via `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` and falls back to `malloc()` only if needed
+- `doomgeneric.c` -> Doom's RGBA framebuffer allocation prefers PSRAM via `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` and falls back to `malloc()` only if needed
 
 The bridge is already written against the official DoomGeneric interface in `doomgeneric.h`, where DoomGeneric exposes the framebuffer pointer, create/tick entry points, and the platform callback contract.
 
@@ -150,9 +159,10 @@ Once the upstream core compiles, the local user-side steps are:
 ## Next compile target
 
 After the upstream core files are present in this folder:
-1. Open `Phase3_entry.ino` in Arduino IDE.
-2. Compile for the ESP32-S3 board target.
-3. Fix any Arduino/ESP32-specific compile issues from the imported upstream C core.
-4. Confirm LittleFS + `/littlefs/doom1.wad` boot path on hardware.
+1. Run `python fetch_doomgeneric_sources.py`.
+2. Open `Phase3_entry.ino` in Arduino IDE.
+3. Compile for the ESP32-S3 board target.
+4. Fix any Arduino/ESP32-specific compile issues from the imported upstream C core.
+5. Confirm LittleFS + `/littlefs/doom1.wad` boot path on hardware.
 
 The next engineering pass should focus on getting the upstream core to compile under Arduino-ESP32 cleanly, then verifying the DoomGeneric file I/O path reaches the board-flash IWAD.
