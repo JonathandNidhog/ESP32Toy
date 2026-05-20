@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 API_DIR = "https://api.github.com/repos/ozkl/doomgeneric/contents/doomgeneric?ref=master"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.1"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.2"
 TARGET_DIR = Path(__file__).resolve().parent
 
 # C implementation files derived from upstream doomgeneric/Makefile's SRC_DOOM
@@ -139,13 +139,13 @@ def patch_doomgeneric_h(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     text = re.sub(
         r"#ifndef DOOMGENERIC_RESX\s*\n#define DOOMGENERIC_RESX\s+\d+",
-        "#ifndef DOOMGENERIC_RESX\n#define DOOMGENERIC_RESX 160",
+        "#ifndef DOOMGENERIC_RESX\n#define DOOMGENERIC_RESX 320",
         text,
         count=1,
     )
     text = re.sub(
         r"#ifndef DOOMGENERIC_RESY\s*\n#define DOOMGENERIC_RESY\s+\d+",
-        "#ifndef DOOMGENERIC_RESY\n#define DOOMGENERIC_RESY 128",
+        "#ifndef DOOMGENERIC_RESY\n#define DOOMGENERIC_RESY 200",
         text,
         count=1,
     )
@@ -214,7 +214,7 @@ def apply_esp32toy_patches() -> None:
         raise RuntimeError(f"Patch target(s) missing after import: {', '.join(missing)}")
 
     patch_doomgeneric_h(doom_h)
-    print("[PATCH] doomgeneric.h -> 160x128")
+    print("[PATCH] doomgeneric.h -> keep classic 320x200 internal framebuffer")
 
     patch_config_h(config_h)
     print('[PATCH] config.h -> FILES_DIR "/littlefs"')
@@ -231,7 +231,8 @@ def write_manifest(imported: Iterable[str]) -> None:
         "excluding desktop platform backends.",
         "",
         "ESP32Toy post-import patches:",
-        "- doomgeneric.h: framebuffer resolution changed to 160x128",
+        "- doomgeneric.h: internal framebuffer kept at classic 320x200",
+        "- platform bridge: downsamples 320x200 to the 160x128 ST7735 panel",
         "- config.h: FILES_DIR changed to /littlefs",
         "- i_system.c: Doom zone memory prefers ESP32 PSRAM via heap_caps_malloc",
         "",
@@ -284,8 +285,8 @@ def main() -> int:
     print(f"       {TARGET_DIR}")
     print(f"[INFO] Skipped {len(skipped)} non-core or desktop-specific files.")
     print("[NEXT] Open Phase3_entry.ino in Arduino IDE and compile.")
-    print("       This imported tree is already patched for 160x128 output,")
-    print("       /littlefs IWAD discovery, and PSRAM-first zone allocation.")
+    print("       This imported tree is already patched for classic 320x200 Doom")
+    print("       rendering, /littlefs IWAD discovery, and PSRAM-first zone allocation.")
     return 0
 
 
