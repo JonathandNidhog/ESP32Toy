@@ -165,9 +165,12 @@ float lastTurnAxis = 0.0f;
 float lastLookAxis = 0.0f;
 
 // Direction knobs tied to RAW physical axes.
-const float MOVE_SIGN = -1.0f;
+// CHANGE IN THIS BUILD:
+//   - Old joystick UP/DOWN reversed.
+//   - New joystick LEFT/RIGHT reversed.
+const float MOVE_SIGN = 1.0f;
 const float STRAFE_SIGN = 1.0f;
-const float TURN_SIGN = -1.0f;
+const float TURN_SIGN = 1.0f;
 const float LOOK_SIGN = -1.0f;
 
 // Fake vertical look state. This is a classic raycaster-style horizon shift,
