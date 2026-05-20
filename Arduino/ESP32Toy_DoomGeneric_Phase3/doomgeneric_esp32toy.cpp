@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <stdio.h>
 #include <string.h>
+#include <esp32-hal-psram.h>
 #include "FS.h"
 #include <LittleFS.h>
 #include <Adafruit_GFX.h>
@@ -151,9 +152,10 @@ static uint32_t flashUntilMs = 0;
 static uint32_t lastLedMs = 0;
 static uint8_t ledPhase = 0;
 
-// ---------------- Board flash / IWAD boot state ----------------
+// ---------------- Board flash / memory boot state ----------------
 static bool littleFSMounted = false;
 static bool iwadPresent = false;
+static bool psramAvailable = false;
 static size_t iwadBytes = 0;
 static uint32_t idleBlinkAtMs = 0;
 static bool idleLedOn = false;
@@ -276,6 +278,14 @@ static void drawBootHeader(void) {
   tft.drawFastHLine(12, 46, 136, rgb565(120, 24, 18));
 }
 
+static void drawMissingPSRAMScreen(void) {
+  drawBootHeader();
+  drawCenteredLine(58, "PSRAM NOT FOUND", ST77XX_RED);
+  drawCenteredLine(72, "ENABLE PSRAM IN IDE", ST77XX_YELLOW);
+  drawCenteredLine(86, "BOARD: ESP32-S3 N16R8", ST77XX_WHITE);
+  drawCenteredLine(100, "DOOM BOOT IS BLOCKED", rgb565(170, 170, 170));
+}
+
 static void drawMissingIWADScreen(void) {
   drawBootHeader();
   drawCenteredLine(58, littleFSMounted ? "BOARD FLASH READY" : "LITTLEFS MOUNT FAILED", littleFSMounted ? ST77XX_GREEN : ST77XX_RED);
@@ -288,7 +298,7 @@ static void drawFoundIWADScreen(void) {
   char sizeLine[32];
   snprintf(sizeLine, sizeof(sizeLine), "WAD OK: %lu KB", (unsigned long)(iwadBytes / 1024UL));
   drawBootHeader();
-  drawCenteredLine(58, "BOARD FLASH LITTLEFS OK", ST77XX_GREEN);
+  drawCenteredLine(58, "PSRAM + FLASH OK", ST77XX_GREEN);
   drawCenteredLine(72, sizeLine, ST77XX_WHITE);
   drawCenteredLine(86, "STARTING DOOM...", ST77XX_YELLOW);
 }
@@ -414,6 +424,15 @@ void ESP32Toy_DoomPlatformInitHardware(void) {
   tft.fillScreen(ST77XX_BLACK);
 
   drawBootHeader();
+  drawCenteredLine(58, "CHECKING PSRAM", ST77XX_WHITE);
+  psramAvailable = psramFound();
+  Serial.printf("[ESP32Toy Doom] PSRAM found: %s\n", psramAvailable ? "yes" : "no");
+  if (!psramAvailable) {
+    drawMissingPSRAMScreen();
+    return;
+  }
+
+  drawBootHeader();
   drawCenteredLine(58, "CALIBRATING STICKS", ST77XX_WHITE);
   calibrateJoysticks();
   mountLittleFSAndFindIWAD();
@@ -444,6 +463,14 @@ void ESP32Toy_DoomPlatformIdle(void) {
 
 bool ESP32Toy_DoomPlatformHasIWAD(void) {
   return littleFSMounted && iwadPresent;
+}
+
+bool ESP32Toy_DoomPlatformHasPSRAM(void) {
+  return psramAvailable;
+}
+
+bool ESP32Toy_DoomPlatformReadyToStart(void) {
+  return ESP32Toy_DoomPlatformHasPSRAM() && ESP32Toy_DoomPlatformHasIWAD();
 }
 
 const char *ESP32Toy_DoomPlatformIWADPath(void) {
