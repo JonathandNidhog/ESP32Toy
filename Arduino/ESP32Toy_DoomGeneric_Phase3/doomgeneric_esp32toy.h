@@ -25,4 +25,5 @@ void DG_SetWindowTitle(const char *title);
 
 // Arduino-facing hardware lifecycle.
 void ESP32Toy_DoomPlatformInitHardware(void);
+void ESP32Toy_DoomPlatformBeforeTick(void);
 void ESP32Toy_DoomPlatformAfterTick(void);
