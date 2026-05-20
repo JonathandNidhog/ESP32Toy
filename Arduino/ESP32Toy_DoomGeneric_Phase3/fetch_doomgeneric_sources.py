@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 API_DIR = "https://api.github.com/repos/ozkl/doomgeneric/contents/doomgeneric?ref=master"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.3"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.4"
 TARGET_DIR = Path(__file__).resolve().parent
 
 # C implementation files derived from upstream doomgeneric/Makefile's SRC_DOOM
@@ -165,6 +165,24 @@ def patch_config_h(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def patch_doomfeatures_h(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+
+    text = re.sub(
+        r"//\s*#undef\s+FEATURE_SOUND",
+        "#undef FEATURE_SOUND",
+        text,
+        count=1,
+    )
+
+    if "#undef FEATURE_SOUND" not in text:
+        if "FEATURE_SOUND" not in text:
+            raise RuntimeError("Could not locate FEATURE_SOUND in doomfeatures.h")
+        text += "\n#undef FEATURE_SOUND\n"
+
+    path.write_text(text, encoding="utf-8")
+
+
 def patch_i_system_c(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
 
@@ -245,10 +263,15 @@ def patch_doomgeneric_c(path: Path) -> None:
 def apply_esp32toy_patches() -> None:
     doom_h = TARGET_DIR / "doomgeneric.h"
     config_h = TARGET_DIR / "config.h"
+    features_h = TARGET_DIR / "doomfeatures.h"
     i_system_c = TARGET_DIR / "i_system.c"
     doomgeneric_c = TARGET_DIR / "doomgeneric.c"
 
-    missing = [str(path.name) for path in (doom_h, config_h, i_system_c, doomgeneric_c) if not path.exists()]
+    missing = [
+        str(path.name)
+        for path in (doom_h, config_h, features_h, i_system_c, doomgeneric_c)
+        if not path.exists()
+    ]
     if missing:
         raise RuntimeError(f"Patch target(s) missing after import: {', '.join(missing)}")
 
@@ -257,6 +280,9 @@ def apply_esp32toy_patches() -> None:
 
     patch_config_h(config_h)
     print('[PATCH] config.h -> FILES_DIR "/littlefs"')
+
+    patch_doomfeatures_h(features_h)
+    print("[PATCH] doomfeatures.h -> force FEATURE_SOUND off")
 
     patch_i_system_c(i_system_c)
     print("[PATCH] i_system.c -> prefer PSRAM for Doom zone memory")
@@ -276,6 +302,7 @@ def write_manifest(imported: Iterable[str]) -> None:
         "- doomgeneric.h: internal framebuffer kept at classic 320x200",
         "- platform bridge: downsamples 320x200 to the 160x128 ST7735 panel",
         "- config.h: FILES_DIR changed to /littlefs",
+        "- doomfeatures.h: FEATURE_SOUND explicitly disabled",
         "- i_system.c: Doom zone memory prefers ESP32 PSRAM via heap_caps_malloc",
         "- doomgeneric.c: Doom framebuffer prefers ESP32 PSRAM via heap_caps_malloc",
         "",
@@ -329,7 +356,8 @@ def main() -> int:
     print(f"[INFO] Skipped {len(skipped)} non-core or desktop-specific files.")
     print("[NEXT] Open Phase3_entry.ino in Arduino IDE and compile.")
     print("       This imported tree is already patched for classic 320x200 Doom")
-    print("       rendering, /littlefs IWAD discovery, and PSRAM-first zone/framebuffer allocation.")
+    print("       rendering, /littlefs IWAD discovery, no-audio runtime mode,")
+    print("       and PSRAM-first zone/framebuffer allocation.")
     return 0
 
 
