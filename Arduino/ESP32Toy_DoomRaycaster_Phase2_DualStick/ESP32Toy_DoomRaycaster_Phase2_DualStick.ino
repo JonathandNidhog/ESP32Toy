@@ -29,6 +29,12 @@
 //   New joystick SW IO13 -> sprint while held
 //   Pot IO1              -> base move speed scale
 //   RGB IO47             -> red Doom pulse / muzzle flash
+//
+// IMPORTANT FIX IN THIS BUILD:
+//   - Game controls now use RAW joystick axes directly.
+//   - No screen-rotation remap is applied to gameplay axes.
+//   - This fixes old joystick left/right turn not responding.
+//   - A fire input also has a robust press fallback and debug indicator.
 // ============================================================
 
 // ---------------- Display pins ----------------
@@ -89,15 +95,6 @@ float applyDeadzone(float v, float deadzoneSize) {
   return signV * clampf(t, 0.0f, 1.0f);
 }
 
-// Screen rotation 3 mapping, matching the current LiquidOS physical orientation.
-// For the joystick modules mounted like the existing one:
-//   physical left/right  -> screen X
-//   physical up/down     -> screen Y
-void mapStickBaseToScreen(float baseX, float baseY, float *screenX, float *screenY) {
-  *screenX = -baseY;
-  *screenY = baseX;
-}
-
 // ============================================================
 // Colors
 // ============================================================
@@ -113,6 +110,7 @@ const uint16_t C_HUD = rgb565(18, 10, 10);
 const uint16_t C_CROSS = rgb565(255, 220, 120);
 const uint16_t C_MAP_BG = rgb565(7, 7, 8);
 const uint16_t C_MAP_WALL = rgb565(90, 28, 22);
+const uint16_t C_GREEN = rgb565(80, 230, 110);
 
 // ============================================================
 // World map
@@ -161,14 +159,24 @@ int leftRawX = 2048;
 int leftRawY = 2048;
 int potRaw = 2048;
 
+float rightAxisX = 0.0f;
+float rightAxisY = 0.0f;
+float leftAxisX = 0.0f;
+float leftAxisY = 0.0f;
+
 float lastMoveAxis = 0.0f;
 float lastStrafeAxis = 0.0f;
 float lastTurnAxis = 0.0f;
 
-// Per-axis direction fix knobs. Leave these for quick correction after testing.
-const float MOVE_SIGN = -1.0f;    // new stick UP should move forward
-const float STRAFE_SIGN = 1.0f;  // new stick RIGHT should strafe right
-const float TURN_SIGN = 1.0f;    // old stick RIGHT should turn right
+// Direction knobs. These are now tied to RAW physical axes.
+// Current guess:
+//   new stick Y up/down    -> movement
+//   new stick X left/right -> strafe
+//   old stick X left/right -> turn
+// If one direction is reversed after testing, only flip the sign below.
+const float MOVE_SIGN = -1.0f;
+const float STRAFE_SIGN = 1.0f;
+const float TURN_SIGN = 1.0f;
 
 bool keyAPrevRaw = HIGH;
 bool keyBPrevRaw = HIGH;
@@ -183,8 +191,9 @@ uint32_t keyAChangedMs = 0;
 uint32_t keyBChangedMs = 0;
 uint32_t rightSWChangedMs = 0;
 
-// Left stick press is used as held sprint. It does not need edge debounce here.
 bool leftSWPressed = false;
+bool keyARawPressed = false;
+uint32_t lastFireMs = 0;
 
 // ============================================================
 // Effects state
@@ -238,6 +247,12 @@ void updateLeds() {
   leds.show();
 }
 
+void fireNow() {
+  muzzleUntilMs = millis() + 110;
+  motorPulse(100);
+  lastFireMs = millis();
+}
+
 // ============================================================
 // Buttons / joystick reading
 // ============================================================
@@ -284,14 +299,20 @@ void updateInputs() {
   leftRawY = analogRead(LEFT_JOY_Y_PIN);
   potRaw = analogRead(POT_PIN);
   leftSWPressed = digitalRead(LEFT_JOY_SW_PIN) == LOW;
+  keyARawPressed = digitalRead(KEY_A_PIN) == LOW;
 
   debounceButton(KEY_A_PIN, &keyAPrevRaw, &keyAStable, &keyAEdge, &keyAChangedMs);
   debounceButton(KEY_B_PIN, &keyBPrevRaw, &keyBStable, &keyBEdge, &keyBChangedMs);
   debounceButton(RIGHT_JOY_SW_PIN, &rightSWPrevRaw, &rightSWStable, &rightSWEdge, &rightSWChangedMs);
 
   if (keyAEdge) {
-    muzzleUntilMs = millis() + 95;
-    motorPulse(85);
+    fireNow();
+  }
+
+  // Fallback: if the edge is somehow missed, a held A key still produces
+  // a clearly visible test shot every 220 ms. This makes hardware diagnosis obvious.
+  if (keyARawPressed && millis() - lastFireMs > 220) {
+    fireNow();
   }
 
   if (keyBEdge) {
@@ -308,30 +329,20 @@ void updateInputs() {
 }
 
 void readDualStickAxes(float *moveAxis, float *strafeAxis, float *turnAxis) {
-  float rightNX = clampf((rightRawX - rightCenterX) / 1800.0f, -1.0f, 1.0f);
-  float rightNY = clampf((rightRawY - rightCenterY) / 1800.0f, -1.0f, 1.0f);
-  float leftNX = clampf((leftRawX - leftCenterX) / 1800.0f, -1.0f, 1.0f);
-  float leftNY = clampf((leftRawY - leftCenterY) / 1800.0f, -1.0f, 1.0f);
+  rightAxisX = clampf((rightRawX - rightCenterX) / 1800.0f, -1.0f, 1.0f);
+  rightAxisY = clampf((rightRawY - rightCenterY) / 1800.0f, -1.0f, 1.0f);
+  leftAxisX = clampf((leftRawX - leftCenterX) / 1800.0f, -1.0f, 1.0f);
+  leftAxisY = clampf((leftRawY - leftCenterY) / 1800.0f, -1.0f, 1.0f);
 
-  rightNX = applyDeadzone(rightNX, 0.14f);
-  rightNY = applyDeadzone(rightNY, 0.14f);
-  leftNX = applyDeadzone(leftNX, 0.14f);
-  leftNY = applyDeadzone(leftNY, 0.14f);
+  rightAxisX = applyDeadzone(rightAxisX, 0.14f);
+  rightAxisY = applyDeadzone(rightAxisY, 0.14f);
+  leftAxisX = applyDeadzone(leftAxisX, 0.14f);
+  leftAxisY = applyDeadzone(leftAxisY, 0.14f);
 
-  float rightScreenX = 0.0f;
-  float rightScreenY = 0.0f;
-  float leftScreenX = 0.0f;
-  float leftScreenY = 0.0f;
-
-  mapStickBaseToScreen(rightNX, rightNY, &rightScreenX, &rightScreenY);
-  mapStickBaseToScreen(leftNX, leftNY, &leftScreenX, &leftScreenY);
-
-  // New left stick controls movement.
-  *moveAxis = leftScreenY * MOVE_SIGN;
-  *strafeAxis = leftScreenX * STRAFE_SIGN;
-
-  // Existing right stick horizontal direction controls looking/turning.
-  *turnAxis = rightScreenX * TURN_SIGN;
+  // RAW joystick axes, no display-rotation swap.
+  *moveAxis = leftAxisY * MOVE_SIGN;
+  *strafeAxis = leftAxisX * STRAFE_SIGN;
+  *turnAxis = rightAxisX * TURN_SIGN;
 }
 
 // ============================================================
@@ -532,13 +543,13 @@ void drawMinimap() {
 }
 
 void drawHud() {
-  canvas.fillRect(0, 0, 98, 26, C_HUD);
+  canvas.fillRect(0, 0, 124, 35, C_HUD);
   canvas.setTextSize(1);
   canvas.setTextWrap(false);
 
   canvas.setTextColor(C_WHITE);
   canvas.setCursor(5, 4);
-  canvas.print("DOOM P2 DUAL");
+  canvas.print("DOOM P2 RAW AXIS");
 
   canvas.setTextColor(C_MUTED);
   canvas.setCursor(5, 13);
@@ -550,16 +561,23 @@ void drawHud() {
   canvas.print(lastTurnAxis, 1);
 
   canvas.setCursor(5, 21);
-  canvas.print(leftSWPressed ? "SPRINT" : "MOVE");
-  canvas.print(" SPD ");
-  int speedPct = (int)(55 + (potRaw / 4095.0f) * 175);
-  canvas.print(speedPct);
-  canvas.print("%");
+  canvas.print("LX");
+  canvas.print(leftAxisX, 1);
+  canvas.print(" LY");
+  canvas.print(leftAxisY, 1);
+  canvas.print(" RX");
+  canvas.print(rightAxisX, 1);
+
+  canvas.setCursor(5, 29);
+  canvas.setTextColor(keyARawPressed ? C_GREEN : C_MUTED);
+  canvas.print(keyARawPressed ? "A:DOWN" : "A:UP");
+  canvas.setTextColor(C_MUTED);
+  canvas.print(leftSWPressed ? " SPRINT" : " MOVE");
 
   canvas.fillRect(0, SCREEN_H - 11, SCREEN_W, 11, rgb565(8, 5, 5));
   canvas.setTextColor(C_MUTED);
   canvas.setCursor(3, SCREEN_H - 9);
-  canvas.print("L=MOVE  R=LOOK  A=FIRE  B=RESET");
+  canvas.print("L MOVE  R TURN  A FIRE  B RESET");
 }
 
 void drawFrame() {
@@ -584,8 +602,8 @@ void drawBoot() {
   canvas.print("DOOM PHASE 2");
   canvas.setTextSize(1);
   canvas.setTextColor(C_MUTED);
-  canvas.setCursor(33, 61);
-  canvas.print("DUAL STICK CONTROL");
+  canvas.setCursor(22, 61);
+  canvas.print("RAW DUAL-STICK CONTROL");
   canvas.setCursor(25, 77);
   canvas.print("KEEP BOTH STICKS CENTERED");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_W, SCREEN_H);
