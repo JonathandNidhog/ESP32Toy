@@ -27,3 +27,8 @@ void DG_SetWindowTitle(const char *title);
 void ESP32Toy_DoomPlatformInitHardware(void);
 void ESP32Toy_DoomPlatformBeforeTick(void);
 void ESP32Toy_DoomPlatformAfterTick(void);
+void ESP32Toy_DoomPlatformIdle(void);
+
+// Board-flash IWAD status.
+bool ESP32Toy_DoomPlatformHasIWAD(void);
+const char *ESP32Toy_DoomPlatformIWADPath(void);
