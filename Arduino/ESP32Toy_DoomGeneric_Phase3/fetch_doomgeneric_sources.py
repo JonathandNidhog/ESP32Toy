@@ -7,18 +7,16 @@ Default behavior is cache-friendly:
 - only missing files are downloaded
 - pass --force to refresh everything from upstream
 
+Important behavior:
+- missing fallback headers no longer stop the script
+- missing/skipped/ignored headers are reported at the end
+- MISSING_HEADER_SUMMARY.txt is written for copy/paste debugging
+
 The script imports:
 - all upstream headers from ozkl/doomgeneric/doomgeneric
 - selected core C files needed by the Doom engine
 - missing reachable headers from Chocolate Doom as a fallback
 - no desktop platform backend C files
-
-Then it applies ESP32Toy-specific patches for:
-- classic 320x200 internal Doom framebuffer
-- LittleFS IWAD lookup under /littlefs
-- sound disabled for the current no-audio hardware
-- PSRAM-first large heap allocations
-- PSRAM BSS placement for several large renderer buffers
 """
 from __future__ import annotations
 
@@ -39,7 +37,7 @@ CHOCOLATE_DOOM_BASES = (
     "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src/doom",
     "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src",
 )
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/2.2"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/2.4"
 TARGET_DIR = Path(__file__).resolve().parent
 MAX_DOWNLOAD_RETRIES = 5
 
@@ -87,8 +85,19 @@ STANDARD_LIBRARY_HEADERS = {
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.h)"', re.MULTILINE)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fetch/repair DoomGeneric core sources for ESP32Toy.")
+    parser.add_argument("--force", action="store_true", help="Redownload files even if they already exist locally.")
+    parser.add_argument("--strict", action="store_true", help="Fail if reachable fallback headers remain missing.")
+    return parser.parse_args()
+
+
+def norm_name(name: str) -> str:
+    return name.replace("\\", "/")
+
+
 def is_ignored_header(name: str) -> bool:
-    normalized = name.replace("\\", "/")
+    normalized = norm_name(name)
     lower = normalized.lower()
     base = Path(normalized).name.lower()
     original_base = Path(normalized).name
@@ -97,16 +106,13 @@ def is_ignored_header(name: str) -> bool:
         or lower.startswith("sdl/")
         or lower.startswith("sdl2/")
         or lower.startswith("sdl3/")
+        or lower.startswith("txt/")
+        or lower.startswith("textscreen/")
         or base.startswith("sdl_")
+        or base.startswith("txt_")
         or lower in STANDARD_LIBRARY_HEADERS
         or base in STANDARD_LIBRARY_HEADERS
     )
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch/repair DoomGeneric core sources for ESP32Toy.")
-    parser.add_argument("--force", action="store_true", help="Redownload files even if they already exist locally.")
-    return parser.parse_args()
 
 
 def fetch_bytes(url: str) -> bytes:
@@ -155,33 +161,34 @@ def list_upstream_files() -> dict[str, str]:
     return out
 
 
-def require(path: Path) -> None:
-    if not path.exists():
-        raise RuntimeError(f"Patch target missing after import: {path.name}")
-
-
 def scan_quoted_includes(path: Path) -> set[str]:
     if not path.exists():
         return set()
     return set(INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
 
 
-def collect_reachable_local_headers() -> set[str]:
+def collect_reachable_local_headers() -> tuple[set[str], set[str]]:
     reachable: set[str] = set()
+    ignored: set[str] = set()
     queue: list[str] = []
     for c_name in CORE_C_FILES:
         queue.extend(scan_quoted_includes(TARGET_DIR / c_name))
     while queue:
         name = queue.pop(0)
-        if is_ignored_header(name) or name in reachable:
+        if is_ignored_header(name):
+            ignored.add(name)
+            continue
+        if name in reachable:
             continue
         reachable.add(name)
         header_path = TARGET_DIR / name
         if header_path.exists():
             for child in scan_quoted_includes(header_path):
-                if not is_ignored_header(child) and child not in reachable:
+                if is_ignored_header(child):
+                    ignored.add(child)
+                elif child not in reachable:
                     queue.append(child)
-    return reachable
+    return reachable, ignored
 
 
 def fetch_from_chocolate(name: str) -> bytes:
@@ -200,36 +207,47 @@ def fetch_from_chocolate(name: str) -> bytes:
     raise urllib.error.URLError(f"Could not fetch {name} from Chocolate Doom fallback")
 
 
-def fetch_missing_reachable_headers_from_chocolate(imported: list[str], force: bool) -> None:
+def fetch_missing_reachable_headers_from_chocolate(imported: list[str], force: bool) -> tuple[set[str], set[str]]:
+    skipped: set[str] = set()
+    ignored_all: set[str] = set()
     for _ in range(20):
-        missing = sorted(
-            name for name in collect_reachable_local_headers()
-            if not is_ignored_header(name) and not (TARGET_DIR / name).exists()
-        )
+        reachable, ignored = collect_reachable_local_headers()
+        ignored_all.update(ignored)
+        missing = sorted(name for name in reachable if not (TARGET_DIR / name).exists())
         if not missing:
-            return
+            break
+        progressed = False
         for name in missing:
             print(f"[FALLBACK] {name} <- Chocolate Doom")
             try:
                 data = fetch_from_chocolate(name)
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:
-                    raise RuntimeError(
-                        f"Missing reachable required header {name}; not found in ozkl/doomgeneric or Chocolate Doom fallback"
-                    ) from exc
-                raise
+                    print(f"[SKIP] {name} not found in fallback; will report later.")
+                    skipped.add(name)
+                    continue
+                print(f"[SKIP] {name} fallback HTTP error: {exc}; will report later.")
+                skipped.add(name)
+                continue
+            except urllib.error.URLError as exc:
+                print(f"[SKIP] {name} fallback download error: {exc}; will report later.")
+                skipped.add(name)
+                continue
             path = TARGET_DIR / name
             if path.exists() and not force:
                 print(f"[CACHE] {name}")
             else:
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
                 imported.append(name)
-    unresolved = sorted(
-        name for name in collect_reachable_local_headers()
-        if not is_ignored_header(name) and not (TARGET_DIR / name).exists()
-    )
-    if unresolved:
-        raise RuntimeError(f"Unresolved reachable headers after fallback import: {', '.join(unresolved)}")
+            progressed = True
+        if not progressed:
+            break
+    reachable, ignored = collect_reachable_local_headers()
+    ignored_all.update(ignored)
+    unresolved = {name for name in reachable if not (TARGET_DIR / name).exists()}
+    skipped.update(unresolved)
+    return skipped, ignored_all
 
 
 def ensure_esp_attr_include(text: str, anchor: str) -> str:
@@ -237,11 +255,15 @@ def ensure_esp_attr_include(text: str, anchor: str) -> str:
         return text
     if anchor not in text:
         raise RuntimeError(f"Could not find include anchor: {anchor!r}")
-    return text.replace(
-        anchor,
-        anchor + "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n#include <esp_attr.h>\n#endif\n",
-        1,
-    )
+    return text.replace(anchor, anchor + "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n#include <esp_attr.h>\n#endif\n", 1)
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    if new in text:
+        return text
+    if old not in text:
+        raise RuntimeError(f"Could not patch {label}: {old}")
+    return text.replace(old, new, 1)
 
 
 def patch_doomgeneric_h(path: Path) -> None:
@@ -275,9 +297,7 @@ def patch_i_system_c(path: Path) -> None:
     old = "        zonemem = malloc(*size);"
     new = "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n        zonemem = heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n        if (zonemem == NULL)\n        {\n            zonemem = malloc(*size);\n        }\n#else\n        zonemem = malloc(*size);\n#endif"
     if "heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)" not in text:
-        if old not in text:
-            raise RuntimeError("Could not find zone malloc site in i_system.c")
-        text = text.replace(old, new, 1)
+        text = replace_once(text, old, new, "i_system.c zone allocation")
     path.write_text(text, encoding="utf-8")
 
 
@@ -289,18 +309,8 @@ def patch_doomgeneric_c(path: Path) -> None:
     old = "\tDG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);"
     new = "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n\tDG_ScreenBuffer = heap_caps_malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4,\n\t                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n\tif (DG_ScreenBuffer == NULL)\n\t{\n\t\tDG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);\n\t}\n#else\n\tDG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);\n#endif"
     if "heap_caps_malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4" not in text:
-        if old not in text:
-            raise RuntimeError("Could not find framebuffer malloc site in doomgeneric.c")
-        text = text.replace(old, new, 1)
+        text = replace_once(text, old, new, "doomgeneric.c framebuffer allocation")
     path.write_text(text, encoding="utf-8")
-
-
-def replace_once(text: str, old: str, new: str, label: str) -> str:
-    if new in text:
-        return text
-    if old not in text:
-        raise RuntimeError(f"Could not patch {label}: {old}")
-    return text.replace(old, new, 1)
 
 
 def patch_r_plane_c(path: Path) -> None:
@@ -341,7 +351,8 @@ def patch_r_things_c(path: Path) -> None:
 
 def apply_esp32toy_patches() -> None:
     for name in PATCH_TARGETS:
-        require(TARGET_DIR / name)
+        if not (TARGET_DIR / name).exists():
+            raise RuntimeError(f"Patch target missing after import: {name}")
     patch_doomgeneric_h(TARGET_DIR / "doomgeneric.h")
     print("[PATCH] doomgeneric.h -> classic 320x200 internal framebuffer")
     patch_config_h(TARGET_DIR / "config.h")
@@ -360,12 +371,13 @@ def apply_esp32toy_patches() -> None:
     print("[PATCH] r_things.c -> sprite helper BSS buffers to PSRAM")
 
 
-def write_manifest(imported: Iterable[str]) -> None:
+def write_manifest(imported: Iterable[str], skipped: Iterable[str], ignored: Iterable[str]) -> None:
     lines = [
         "Imported from https://github.com/ozkl/doomgeneric/tree/master/doomgeneric",
         "Fallback headers may be imported from https://github.com/chocolate-doom/chocolate-doom",
         "Source selection: all ozkl headers + selected core C files + missing reachable Chocolate Doom headers.",
-        "Desktop-only SDL/SDL2 dependencies and compiler-provided standard headers are intentionally ignored.",
+        "Desktop-only SDL/SDL2/textscreen dependencies and compiler-provided standard headers are intentionally ignored.",
+        "Missing fallback headers are reported but do not stop the script by default.",
         "",
         "ESP32Toy post-import patches:",
         "- classic 320x200 internal framebuffer",
@@ -377,7 +389,27 @@ def write_manifest(imported: Iterable[str]) -> None:
         "Files:",
     ]
     lines.extend(f"- {name}" for name in sorted(set(imported)))
+    if skipped:
+        lines += ["", "Skipped missing fallback headers:"]
+        lines.extend(f"- {name}" for name in sorted(set(skipped)))
+    if ignored:
+        lines += ["", "Ignored headers:"]
+        lines.extend(f"- {name}" for name in sorted(set(ignored)))
     (TARGET_DIR / "UPSTREAM_IMPORT_MANIFEST.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_missing_summary(skipped: Iterable[str], ignored: Iterable[str]) -> None:
+    skipped_set = sorted(set(skipped))
+    ignored_set = sorted(set(ignored))
+    lines = [
+        "ESP32Toy DoomGeneric source repair summary",
+        "",
+        "Missing fallback headers:",
+    ]
+    lines.extend(f"- {name}" for name in skipped_set) if skipped_set else lines.append("- none")
+    lines += ["", "Ignored headers:"]
+    lines.extend(f"- {name}" for name in ignored_set) if ignored_set else lines.append("- none")
+    (TARGET_DIR / "MISSING_HEADER_SUMMARY.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -403,23 +435,34 @@ def main() -> int:
         try:
             data = fetch_bytes(upstream_files[name])
         except urllib.error.URLError as exc:
-            print(f"[ERROR] Failed to download {name}: {exc}", file=sys.stderr)
-            return 3
+            print(f"[SKIP] Failed to download {name}: {exc}")
+            continue
         (TARGET_DIR / name).write_bytes(data)
         imported.append(name)
 
     try:
-        fetch_missing_reachable_headers_from_chocolate(imported, args.force)
+        skipped, ignored = fetch_missing_reachable_headers_from_chocolate(imported, args.force)
         apply_esp32toy_patches()
     except RuntimeError as exc:
         print(f"[ERROR] Patch/import stage failed: {exc}", file=sys.stderr)
         return 4
 
     all_local_core = sorted(name for name in (CORE_C_FILES | {p.name for p in TARGET_DIR.glob('*.h')}) if (TARGET_DIR / name).exists())
-    write_manifest(all_local_core)
+    write_manifest(all_local_core, skipped, ignored)
+    write_missing_summary(skipped, ignored)
+
     print("")
     print("[DONE] Doom core is ready in:")
     print(f"       {TARGET_DIR}")
+    if skipped:
+        print("[WARN] Some fallback headers were skipped. See MISSING_HEADER_SUMMARY.txt")
+        for name in sorted(skipped):
+            print(f"       - {name}")
+        if args.strict:
+            print("[ERROR] --strict enabled and missing headers remain.", file=sys.stderr)
+            return 6
+    if ignored:
+        print("[INFO] Ignored desktop/system headers are listed in MISSING_HEADER_SUMMARY.txt")
     print("[NEXT] Open ESP32Toy_DoomGeneric_Phase3.ino in Arduino IDE and compile.")
     if not args.force:
         print("[INFO] Existing files were reused. Use --force to redownload everything.")
