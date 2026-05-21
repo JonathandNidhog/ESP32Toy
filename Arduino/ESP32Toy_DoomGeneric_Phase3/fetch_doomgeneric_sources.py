@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -28,8 +30,9 @@ from typing import Iterable
 TREE_API = "https://api.github.com/repos/ozkl/doomgeneric/git/trees/master?recursive=1"
 RAW_BASE = "https://raw.githubusercontent.com/ozkl/doomgeneric/master/doomgeneric"
 CHOCOLATE_RAW_BASE = "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src/doom"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.8"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.9"
 TARGET_DIR = Path(__file__).resolve().parent
+MAX_DOWNLOAD_RETRIES = 5
 
 CORE_C_FILES = {
     "dummy.c",
@@ -129,9 +132,34 @@ INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.h)"', re.MULTILINE)
 
 
 def fetch_bytes(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        return resp.read()
+    last_exc: BaseException | None = None
+
+    for attempt in range(1, MAX_DOWNLOAD_RETRIES + 1):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/vnd.github.raw, text/plain, */*",
+                "Connection": "close",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=75) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            # 404 is a real missing file.  Most other HTTP failures may be transient.
+            if exc.code == 404:
+                raise
+            last_exc = exc
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionResetError) as exc:
+            last_exc = exc
+
+        if attempt < MAX_DOWNLOAD_RETRIES:
+            sleep_s = min(2 ** (attempt - 1), 8)
+            print(f"[RETRY] {attempt}/{MAX_DOWNLOAD_RETRIES} failed for {url}: {last_exc}. Retrying in {sleep_s}s...")
+            time.sleep(sleep_s)
+
+    raise urllib.error.URLError(f"Failed after {MAX_DOWNLOAD_RETRIES} attempts: {url}; last error: {last_exc}")
 
 
 def fetch_json(url: str):
