@@ -5,6 +5,7 @@ Fetch the upstream DoomGeneric C core into this Arduino sketch folder.
 This script imports:
 - all upstream headers from ozkl/doomgeneric/doomgeneric
 - selected core C files needed by the Doom engine
+- missing included headers from Chocolate Doom as a fallback
 - no desktop platform backend files
 
 Then it applies ESP32Toy-specific patches for:
@@ -26,7 +27,8 @@ from typing import Iterable
 
 TREE_API = "https://api.github.com/repos/ozkl/doomgeneric/git/trees/master?recursive=1"
 RAW_BASE = "https://raw.githubusercontent.com/ozkl/doomgeneric/master/doomgeneric"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.7"
+CHOCOLATE_RAW_BASE = "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src/doom"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.8"
 TARGET_DIR = Path(__file__).resolve().parent
 
 CORE_C_FILES = {
@@ -123,6 +125,8 @@ PATCH_TARGETS = {
     "r_things.c",
 }
 
+INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.h)"', re.MULTILINE)
+
 
 def fetch_bytes(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -153,6 +157,54 @@ def list_upstream_files() -> dict[str, str]:
 def require(path: Path) -> None:
     if not path.exists():
         raise RuntimeError(f"Patch target missing after import: {path.name}")
+
+
+def collect_local_includes() -> set[str]:
+    includes: set[str] = set()
+    for path in TARGET_DIR.glob("*.c"):
+        includes.update(INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
+    for path in TARGET_DIR.glob("*.h"):
+        includes.update(INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
+    return includes
+
+
+def fetch_missing_headers_from_chocolate(imported: list[str]) -> None:
+    # Resolve local quoted header includes until fixed point.  ozkl/doomgeneric
+    # is not fully self-contained; some .c files still include headers that only
+    # exist in the fuller Chocolate Doom tree, such as st_stuff.h.
+    for _ in range(12):
+        missing = sorted(
+            name for name in collect_local_includes()
+            if not (TARGET_DIR / name).exists()
+        )
+        if not missing:
+            return
+
+        progress = False
+        for name in missing:
+            url = f"{CHOCOLATE_RAW_BASE}/{name}"
+            print(f"[FALLBACK] {name} <- Chocolate Doom")
+            try:
+                data = fetch_bytes(url)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    raise RuntimeError(
+                        f"Missing required header {name}; not found in ozkl/doomgeneric or Chocolate Doom fallback"
+                    ) from exc
+                raise
+            (TARGET_DIR / name).write_bytes(data)
+            imported.append(name)
+            progress = True
+
+        if not progress:
+            break
+
+    unresolved = sorted(
+        name for name in collect_local_includes()
+        if not (TARGET_DIR / name).exists()
+    )
+    if unresolved:
+        raise RuntimeError(f"Unresolved local headers after fallback import: {', '.join(unresolved)}")
 
 
 def ensure_esp_attr_include(text: str, anchor: str) -> str:
@@ -340,7 +392,8 @@ def apply_esp32toy_patches() -> None:
 def write_manifest(imported: Iterable[str]) -> None:
     lines = [
         "Imported from https://github.com/ozkl/doomgeneric/tree/master/doomgeneric",
-        "Source selection: all upstream headers + selected core C files, excluding desktop backends.",
+        "Fallback headers may be imported from https://github.com/chocolate-doom/chocolate-doom/tree/master/src/doom",
+        "Source selection: all ozkl headers + selected core C files + missing included Chocolate Doom headers.",
         "",
         "ESP32Toy post-import patches:",
         "- classic 320x200 internal framebuffer",
@@ -381,9 +434,10 @@ def main() -> int:
         imported.append(name)
 
     try:
+        fetch_missing_headers_from_chocolate(imported)
         apply_esp32toy_patches()
     except RuntimeError as exc:
-        print(f"[ERROR] Patch stage failed: {exc}", file=sys.stderr)
+        print(f"[ERROR] Patch/import stage failed: {exc}", file=sys.stderr)
         return 4
 
     write_manifest(imported)
