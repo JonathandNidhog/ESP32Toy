@@ -389,15 +389,14 @@ static void updateDigitalKeys() {
 
   // DoomGeneric keyboard mapping for the ESP32Toy hardware:
   //   A button          -> fire in-game + enter/confirm in menus
-  //   B button          -> use/open door in-game + escape/back in menus
+  //   B button          -> escape/menu/back only
   //   Old/right SW      -> run modifier
-  //   New/left SW       -> automap toggle
+  //   New/left SW       -> use/open door
   setDoomKey(KEY_FIRE, a);
   setDoomKey(KEY_ENTER, a);
-  setDoomKey(KEY_USE, b);
   setDoomKey(KEY_ESCAPE, b);
   setDoomKey(KEY_RSHIFT, rightSW);
-  setDoomKey(KEY_TAB, leftSW);
+  setDoomKey(KEY_USE, leftSW);
 
   static bool aPrev = false;
   if (a && !aPrev) {
