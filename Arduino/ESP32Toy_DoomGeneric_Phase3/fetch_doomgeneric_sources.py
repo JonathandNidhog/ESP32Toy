@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Fetch the upstream DoomGeneric C core into this Arduino sketch folder.
+Fetch / repair the DoomGeneric C core for the ESP32Toy Doom Runtime.
 
-This script imports:
+Default behavior is cache-friendly:
+- existing local files are reused
+- only missing files are downloaded
+- pass --force to refresh everything from upstream
+
+The script imports:
 - all upstream headers from ozkl/doomgeneric/doomgeneric
 - selected core C files needed by the Doom engine
-- missing included headers from Chocolate Doom as a fallback
-- no desktop platform backend files
+- missing reachable headers from Chocolate Doom as a fallback
+- no desktop platform backend C files
 
 Then it applies ESP32Toy-specific patches for:
 - classic 320x200 internal Doom framebuffer
@@ -17,6 +22,7 @@ Then it applies ESP32Toy-specific patches for:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import ssl
@@ -29,8 +35,11 @@ from typing import Iterable
 
 TREE_API = "https://api.github.com/repos/ozkl/doomgeneric/git/trees/master?recursive=1"
 RAW_BASE = "https://raw.githubusercontent.com/ozkl/doomgeneric/master/doomgeneric"
-CHOCOLATE_RAW_BASE = "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src/doom"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.9"
+CHOCOLATE_DOOM_BASES = (
+    "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src/doom",
+    "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src",
+)
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/2.0"
 TARGET_DIR = Path(__file__).resolve().parent
 MAX_DOWNLOAD_RETRIES = 5
 
@@ -128,7 +137,40 @@ PATCH_TARGETS = {
     "r_things.c",
 }
 
+# These appear in desktop-only headers and must not trigger Arduino fallback fetches.
+DESKTOP_ONLY_HEADERS = {
+    "SDL.h",
+    "SDL_audio.h",
+    "SDL_cdrom.h",
+    "SDL_endian.h",
+    "SDL_error.h",
+    "SDL_events.h",
+    "SDL_joystick.h",
+    "SDL_keyboard.h",
+    "SDL_keycode.h",
+    "SDL_main.h",
+    "SDL_mixer.h",
+    "SDL_mouse.h",
+    "SDL_mutex.h",
+    "SDL_opengl.h",
+    "SDL_rwops.h",
+    "SDL_scancode.h",
+    "SDL_stdinc.h",
+    "SDL_surface.h",
+    "SDL_thread.h",
+    "SDL_timer.h",
+    "SDL_types.h",
+    "SDL_version.h",
+    "SDL_video.h",
+}
+
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.h)"', re.MULTILINE)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fetch/repair DoomGeneric core sources for ESP32Toy.")
+    parser.add_argument("--force", action="store_true", help="Redownload files even if they already exist locally.")
+    return parser.parse_args()
 
 
 def fetch_bytes(url: str) -> bytes:
@@ -147,7 +189,6 @@ def fetch_bytes(url: str) -> bytes:
             with urllib.request.urlopen(req, timeout=75) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
-            # 404 is a real missing file.  Most other HTTP failures may be transient.
             if exc.code == 404:
                 raise
             last_exc = exc
@@ -182,57 +223,97 @@ def list_upstream_files() -> dict[str, str]:
     return out
 
 
+def write_file_if_needed(name: str, data: bytes, force: bool) -> bool:
+    path = TARGET_DIR / name
+    if path.exists() and not force:
+        print(f"[CACHE] {name}")
+        return False
+    path.write_bytes(data)
+    return True
+
+
 def require(path: Path) -> None:
     if not path.exists():
         raise RuntimeError(f"Patch target missing after import: {path.name}")
 
 
-def collect_local_includes() -> set[str]:
-    includes: set[str] = set()
-    for path in TARGET_DIR.glob("*.c"):
-        includes.update(INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
-    for path in TARGET_DIR.glob("*.h"):
-        includes.update(INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
-    return includes
+def scan_quoted_includes(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return set(INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
 
 
-def fetch_missing_headers_from_chocolate(imported: list[str]) -> None:
-    # Resolve local quoted header includes until fixed point.  ozkl/doomgeneric
-    # is not fully self-contained; some .c files still include headers that only
-    # exist in the fuller Chocolate Doom tree, such as st_stuff.h.
-    for _ in range(12):
+def collect_reachable_local_headers() -> set[str]:
+    """Return quoted headers reachable from the selected core C files.
+
+    This deliberately does not scan every imported header, because the upstream
+    directory contains desktop-only headers whose dependency graph leads to SDL.
+    Arduino does not compile those desktop paths.
+    """
+    reachable: set[str] = set()
+    queue: list[str] = []
+
+    for c_name in CORE_C_FILES:
+        queue.extend(scan_quoted_includes(TARGET_DIR / c_name))
+
+    while queue:
+        name = queue.pop(0)
+        if name in DESKTOP_ONLY_HEADERS or name in reachable:
+            continue
+        reachable.add(name)
+        header_path = TARGET_DIR / name
+        if header_path.exists():
+            for child in scan_quoted_includes(header_path):
+                if child not in reachable and child not in DESKTOP_ONLY_HEADERS:
+                    queue.append(child)
+
+    return reachable
+
+
+def fetch_from_chocolate(name: str) -> bytes:
+    last_404: urllib.error.HTTPError | None = None
+    for base in CHOCOLATE_DOOM_BASES:
+        url = f"{base}/{name}"
+        try:
+            return fetch_bytes(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                last_404 = exc
+                continue
+            raise
+    if last_404 is not None:
+        raise last_404
+    raise urllib.error.URLError(f"Could not fetch {name} from Chocolate Doom fallback")
+
+
+def fetch_missing_reachable_headers_from_chocolate(imported: list[str], force: bool) -> None:
+    for _ in range(20):
         missing = sorted(
-            name for name in collect_local_includes()
-            if not (TARGET_DIR / name).exists()
+            name for name in collect_reachable_local_headers()
+            if name not in DESKTOP_ONLY_HEADERS and not (TARGET_DIR / name).exists()
         )
         if not missing:
             return
 
-        progress = False
         for name in missing:
-            url = f"{CHOCOLATE_RAW_BASE}/{name}"
             print(f"[FALLBACK] {name} <- Chocolate Doom")
             try:
-                data = fetch_bytes(url)
+                data = fetch_from_chocolate(name)
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:
                     raise RuntimeError(
-                        f"Missing required header {name}; not found in ozkl/doomgeneric or Chocolate Doom fallback"
+                        f"Missing reachable required header {name}; not found in ozkl/doomgeneric or Chocolate Doom fallback"
                     ) from exc
                 raise
-            (TARGET_DIR / name).write_bytes(data)
-            imported.append(name)
-            progress = True
-
-        if not progress:
-            break
+            if write_file_if_needed(name, data, force):
+                imported.append(name)
 
     unresolved = sorted(
-        name for name in collect_local_includes()
-        if not (TARGET_DIR / name).exists()
+        name for name in collect_reachable_local_headers()
+        if name not in DESKTOP_ONLY_HEADERS and not (TARGET_DIR / name).exists()
     )
     if unresolved:
-        raise RuntimeError(f"Unresolved local headers after fallback import: {', '.join(unresolved)}")
+        raise RuntimeError(f"Unresolved reachable headers after fallback import: {', '.join(unresolved)}")
 
 
 def ensure_esp_attr_include(text: str, anchor: str) -> str:
@@ -420,8 +501,9 @@ def apply_esp32toy_patches() -> None:
 def write_manifest(imported: Iterable[str]) -> None:
     lines = [
         "Imported from https://github.com/ozkl/doomgeneric/tree/master/doomgeneric",
-        "Fallback headers may be imported from https://github.com/chocolate-doom/chocolate-doom/tree/master/src/doom",
-        "Source selection: all ozkl headers + selected core C files + missing included Chocolate Doom headers.",
+        "Fallback headers may be imported from https://github.com/chocolate-doom/chocolate-doom",
+        "Source selection: all ozkl headers + selected core C files + missing reachable Chocolate Doom headers.",
+        "Desktop-only SDL dependencies are intentionally ignored.",
         "",
         "ESP32Toy post-import patches:",
         "- classic 320x200 internal framebuffer",
@@ -432,11 +514,12 @@ def write_manifest(imported: Iterable[str]) -> None:
         "",
         "Files:",
     ]
-    lines.extend(f"- {name}" for name in sorted(imported))
+    lines.extend(f"- {name}" for name in sorted(set(imported)))
     (TARGET_DIR / "UPSTREAM_IMPORT_MANIFEST.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
+    args = parse_args()
     print("[ESP32Toy Doom] Listing upstream DoomGeneric files...")
     try:
         upstream_files = list_upstream_files()
@@ -444,7 +527,7 @@ def main() -> int:
         print(f"[ERROR] Could not list upstream files: {exc}", file=sys.stderr)
         return 2
 
-    missing_core = sorted(name for name in CORE_C_FILES if name not in upstream_files)
+    missing_core = sorted(name for name in CORE_C_FILES if name not in upstream_files and not (TARGET_DIR / name).exists())
     if missing_core:
         print(f"[ERROR] Upstream file list is missing required C files: {', '.join(missing_core)}", file=sys.stderr)
         return 5
@@ -452,6 +535,9 @@ def main() -> int:
     import_names = sorted(upstream_files.keys())
     imported: list[str] = []
     for name in import_names:
+        if (TARGET_DIR / name).exists() and not args.force:
+            print(f"[CACHE] {name}")
+            continue
         print(f"[FETCH] {name}")
         try:
             data = fetch_bytes(upstream_files[name])
@@ -462,18 +548,21 @@ def main() -> int:
         imported.append(name)
 
     try:
-        fetch_missing_headers_from_chocolate(imported)
+        fetch_missing_reachable_headers_from_chocolate(imported, args.force)
         apply_esp32toy_patches()
     except RuntimeError as exc:
         print(f"[ERROR] Patch/import stage failed: {exc}", file=sys.stderr)
         return 4
 
-    write_manifest(imported)
+    all_local_core = sorted(name for name in (CORE_C_FILES | {p.name for p in TARGET_DIR.glob('*.h')}) if (TARGET_DIR / name).exists())
+    write_manifest(all_local_core)
 
     print("")
-    print(f"[DONE] Imported {len(imported)} files into:")
+    print(f"[DONE] Doom core is ready in:")
     print(f"       {TARGET_DIR}")
     print("[NEXT] Open ESP32Toy_DoomGeneric_Phase3.ino in Arduino IDE and compile.")
+    if not args.force:
+        print("[INFO] Existing files were reused. Use --force to redownload everything.")
     return 0
 
 
