@@ -1,4 +1,5 @@
 //
+// Copyright(C) 1993-1996 Id Software, Inc.
 // Copyright(C) 2005-2014 Simon Howard
 //
 // This program is free software; you can redistribute it and/or
@@ -12,29 +13,33 @@
 // GNU General Public License for more details.
 //
 // DESCRIPTION:
-//     SHA-1 digest.
 //
+//    
 
-#ifndef __SHA1_H__
-#define __SHA1_H__
+
+#ifndef __F_FINALE__
+#define __F_FINALE__
+
 
 #include "doomtype.h"
+#include "d_event.h"
+//
+// FINALE
+//
 
-typedef struct sha1_context_s sha1_context_t;
-typedef byte sha1_digest_t[20];
+// Called by main loop.
+boolean F_Responder (event_t* ev);
 
-struct sha1_context_s {
-    uint32_t h0,h1,h2,h3,h4;
-    uint32_t nblocks;
-    byte buf[64];
-    int count;
-};
+// Called by main loop.
+void F_Ticker (void);
 
-void SHA1_Init(sha1_context_t *context);
-void SHA1_Update(sha1_context_t *context, byte *buf, size_t len);
-void SHA1_Final(sha1_digest_t digest, sha1_context_t *context);
-void SHA1_UpdateInt32(sha1_context_t *context, unsigned int val);
-void SHA1_UpdateString(sha1_context_t *context, char *str);
+// Called by main loop.
+void F_Drawer (void);
 
-#endif /* #ifndef __SHA1_H__ */
 
+void F_StartFinale (void);
+
+
+
+
+#endif

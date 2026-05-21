@@ -1,4 +1,5 @@
 //
+// Copyright(C) 1993-1996 Id Software, Inc.
 // Copyright(C) 2005-2014 Simon Howard
 //
 // This program is free software; you can redistribute it and/or
@@ -12,29 +13,31 @@
 // GNU General Public License for more details.
 //
 // DESCRIPTION:
-//     SHA-1 digest.
-//
+//	Typedefs related to to textures etc.,
+//	 isolated here to make it easier separating modules.
+//    
 
-#ifndef __SHA1_H__
-#define __SHA1_H__
+
+#ifndef __D_TEXTUR__
+#define __D_TEXTUR__
 
 #include "doomtype.h"
 
-typedef struct sha1_context_s sha1_context_t;
-typedef byte sha1_digest_t[20];
 
-struct sha1_context_s {
-    uint32_t h0,h1,h2,h3,h4;
-    uint32_t nblocks;
-    byte buf[64];
-    int count;
-};
 
-void SHA1_Init(sha1_context_t *context);
-void SHA1_Update(sha1_context_t *context, byte *buf, size_t len);
-void SHA1_Final(sha1_digest_t digest, sha1_context_t *context);
-void SHA1_UpdateInt32(sha1_context_t *context, unsigned int val);
-void SHA1_UpdateString(sha1_context_t *context, char *str);
 
-#endif /* #ifndef __SHA1_H__ */
+//
+// Flats?
+//
+// a pic is an unmasked block of pixels
+typedef struct
+{
+    byte		width;
+    byte		height;
+    byte		data;
+} pic_t;
 
+
+
+
+#endif

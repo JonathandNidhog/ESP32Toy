@@ -1,4 +1,5 @@
 //
+// Copyright(C) 1993-1996 Id Software, Inc.
 // Copyright(C) 2005-2014 Simon Howard
 //
 // This program is free software; you can redistribute it and/or
@@ -12,29 +13,50 @@
 // GNU General Public License for more details.
 //
 // DESCRIPTION:
-//     SHA-1 digest.
+//	Fixed point implementation.
 //
 
-#ifndef __SHA1_H__
-#define __SHA1_H__
+
+
+#include "stdlib.h"
 
 #include "doomtype.h"
+#include "i_system.h"
 
-typedef struct sha1_context_s sha1_context_t;
-typedef byte sha1_digest_t[20];
+#include "m_fixed.h"
 
-struct sha1_context_s {
-    uint32_t h0,h1,h2,h3,h4;
-    uint32_t nblocks;
-    byte buf[64];
-    int count;
-};
 
-void SHA1_Init(sha1_context_t *context);
-void SHA1_Update(sha1_context_t *context, byte *buf, size_t len);
-void SHA1_Final(sha1_digest_t digest, sha1_context_t *context);
-void SHA1_UpdateInt32(sha1_context_t *context, unsigned int val);
-void SHA1_UpdateString(sha1_context_t *context, char *str);
 
-#endif /* #ifndef __SHA1_H__ */
+
+// Fixme. __USE_C_FIXED__ or something.
+
+fixed_t
+FixedMul
+( fixed_t	a,
+  fixed_t	b )
+{
+    return ((int64_t) a * (int64_t) b) >> FRACBITS;
+}
+
+
+
+//
+// FixedDiv, C version.
+//
+
+fixed_t FixedDiv(fixed_t a, fixed_t b)
+{
+    if ((abs(a) >> 14) >= abs(b))
+    {
+	return (a^b) < 0 ? INT_MIN : INT_MAX;
+    }
+    else
+    {
+	int64_t result;
+
+	result = ((int64_t) a << 16) / b;
+
+	return (fixed_t) result;
+    }
+}
 

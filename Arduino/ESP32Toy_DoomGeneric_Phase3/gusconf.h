@@ -12,29 +12,18 @@
 // GNU General Public License for more details.
 //
 // DESCRIPTION:
-//     SHA-1 digest.
+//     GUS emulation code.
 //
 
-#ifndef __SHA1_H__
-#define __SHA1_H__
+#ifndef __GUSCONF_H__
+#define __GUSCONF_H__
 
 #include "doomtype.h"
 
-typedef struct sha1_context_s sha1_context_t;
-typedef byte sha1_digest_t[20];
+extern char *gus_patch_path;
+extern unsigned int gus_ram_kb;
 
-struct sha1_context_s {
-    uint32_t h0,h1,h2,h3,h4;
-    uint32_t nblocks;
-    byte buf[64];
-    int count;
-};
+boolean GUS_WriteConfig(char *path);
 
-void SHA1_Init(sha1_context_t *context);
-void SHA1_Update(sha1_context_t *context, byte *buf, size_t len);
-void SHA1_Final(sha1_digest_t digest, sha1_context_t *context);
-void SHA1_UpdateInt32(sha1_context_t *context, unsigned int val);
-void SHA1_UpdateString(sha1_context_t *context, char *str);
-
-#endif /* #ifndef __SHA1_H__ */
+#endif /* #ifndef __GUSCONF_H__ */
 
