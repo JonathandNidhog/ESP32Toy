@@ -27,12 +27,9 @@ from pathlib import Path
 from typing import Iterable
 
 API_DIR = "https://api.github.com/repos/ozkl/doomgeneric/contents/doomgeneric?ref=master"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.4"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.5"
 TARGET_DIR = Path(__file__).resolve().parent
 
-# C implementation files derived from upstream doomgeneric/Makefile's SRC_DOOM
-# list, excluding the desktop platform backend doomgeneric_xlib.c. Headers are
-# downloaded wholesale because they are lightweight and transitively included.
 CORE_C_FILES = {
     "dummy.c",
     "am_map.c",
@@ -135,6 +132,14 @@ def should_import(name: str) -> bool:
     return False
 
 
+def ensure_esp_attr_include(text: str, anchor: str) -> str:
+    if "#include <esp_attr.h>" in text:
+        return text
+    if anchor not in text:
+        raise RuntimeError(f"Could not find include anchor: {anchor!r}")
+    return text.replace(anchor, anchor + "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n#include <esp_attr.h>\n#endif\n", 1)
+
+
 def patch_doomgeneric_h(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     text = re.sub(
@@ -167,19 +172,11 @@ def patch_config_h(path: Path) -> None:
 
 def patch_doomfeatures_h(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-
-    text = re.sub(
-        r"//\s*#undef\s+FEATURE_SOUND",
-        "#undef FEATURE_SOUND",
-        text,
-        count=1,
-    )
-
+    text = re.sub(r"//\s*#undef\s+FEATURE_SOUND", "#undef FEATURE_SOUND", text, count=1)
     if "#undef FEATURE_SOUND" not in text:
         if "FEATURE_SOUND" not in text:
             raise RuntimeError("Could not locate FEATURE_SOUND in doomfeatures.h")
         text += "\n#undef FEATURE_SOUND\n"
-
     path.write_text(text, encoding="utf-8")
 
 
@@ -203,8 +200,6 @@ def patch_i_system_c(path: Path) -> None:
     new_alloc = (
         "#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)\n"
         "        // Doom's large zone block should live in PSRAM on the ESP32-S3.\n"
-        "        // If PSRAM allocation fails, keep the upstream malloc fallback so\n"
-        "        // the failure path and error reporting remain intact.\n"
         "        zonemem = heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n"
         "        if (zonemem == NULL)\n"
         "        {\n"
@@ -260,35 +255,103 @@ def patch_doomgeneric_c(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def patch_r_plane_c(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = ensure_esp_attr_include(text, "#include <stdlib.h>\n")
+
+    replacements = {
+        "visplane_t\t\t\tvisplanes[MAXVISPLANES];": "EXT_RAM_BSS_ATTR visplane_t\t\t\tvisplanes[MAXVISPLANES];",
+        "short\t\t\topenings[MAXOPENINGS];": "EXT_RAM_BSS_ATTR short\t\t\topenings[MAXOPENINGS];",
+        "short\t\t\tfloorclip[SCREENWIDTH];": "EXT_RAM_BSS_ATTR short\t\t\tfloorclip[SCREENWIDTH];",
+        "short\t\t\tceilingclip[SCREENWIDTH];": "EXT_RAM_BSS_ATTR short\t\t\tceilingclip[SCREENWIDTH];",
+        "int\t\t\tspanstart[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR int\t\t\tspanstart[SCREENHEIGHT];",
+        "int\t\t\tspanstop[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR int\t\t\tspanstop[SCREENHEIGHT];",
+        "fixed_t\t\t\tyslope[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR fixed_t\t\t\tyslope[SCREENHEIGHT];",
+        "fixed_t\t\t\tdistscale[SCREENWIDTH];": "EXT_RAM_BSS_ATTR fixed_t\t\t\tdistscale[SCREENWIDTH];",
+        "fixed_t\t\t\tcachedheight[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR fixed_t\t\t\tcachedheight[SCREENHEIGHT];",
+        "fixed_t\t\t\tcacheddistance[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR fixed_t\t\t\tcacheddistance[SCREENHEIGHT];",
+        "fixed_t\t\t\tcachedxstep[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR fixed_t\t\t\tcachedxstep[SCREENHEIGHT];",
+        "fixed_t\t\t\tcachedystep[SCREENHEIGHT];": "EXT_RAM_BSS_ATTR fixed_t\t\t\tcachedystep[SCREENHEIGHT];",
+    }
+
+    for old, new in replacements.items():
+        if new in text:
+            continue
+        if old not in text:
+            raise RuntimeError(f"Could not patch r_plane.c symbol: {old}")
+        text = text.replace(old, new, 1)
+
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_r_bsp_c(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = ensure_esp_attr_include(text, "#include \"doomdef.h\"\n")
+
+    replacements = {
+        "drawseg_t\tdrawsegs[MAXDRAWSEGS];": "EXT_RAM_BSS_ATTR drawseg_t\tdrawsegs[MAXDRAWSEGS];",
+        "cliprange_t\tsolidsegs[MAXSEGS];": "EXT_RAM_BSS_ATTR cliprange_t\tsolidsegs[MAXSEGS];",
+    }
+    for old, new in replacements.items():
+        if new in text:
+            continue
+        if old not in text:
+            raise RuntimeError(f"Could not patch r_bsp.c symbol: {old}")
+        text = text.replace(old, new, 1)
+
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_r_things_c(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = ensure_esp_attr_include(text, "#include <stdlib.h>\n")
+
+    replacements = {
+        "short\t\tnegonearray[SCREENWIDTH];": "EXT_RAM_BSS_ATTR short\t\tnegonearray[SCREENWIDTH];",
+        "short\t\tscreenheightarray[SCREENWIDTH];": "EXT_RAM_BSS_ATTR short\t\tscreenheightarray[SCREENWIDTH];",
+        "spriteframe_t\tsprtemp[29];": "EXT_RAM_BSS_ATTR spriteframe_t\tsprtemp[29];",
+    }
+    for old, new in replacements.items():
+        if new in text:
+            continue
+        if old not in text:
+            raise RuntimeError(f"Could not patch r_things.c symbol: {old}")
+        text = text.replace(old, new, 1)
+
+    path.write_text(text, encoding="utf-8")
+
+
 def apply_esp32toy_patches() -> None:
     doom_h = TARGET_DIR / "doomgeneric.h"
     config_h = TARGET_DIR / "config.h"
     features_h = TARGET_DIR / "doomfeatures.h"
     i_system_c = TARGET_DIR / "i_system.c"
     doomgeneric_c = TARGET_DIR / "doomgeneric.c"
+    r_plane_c = TARGET_DIR / "r_plane.c"
+    r_bsp_c = TARGET_DIR / "r_bsp.c"
+    r_things_c = TARGET_DIR / "r_things.c"
 
-    missing = [
-        str(path.name)
-        for path in (doom_h, config_h, features_h, i_system_c, doomgeneric_c)
-        if not path.exists()
-    ]
+    targets = (doom_h, config_h, features_h, i_system_c, doomgeneric_c, r_plane_c, r_bsp_c, r_things_c)
+    missing = [str(path.name) for path in targets if not path.exists()]
     if missing:
         raise RuntimeError(f"Patch target(s) missing after import: {', '.join(missing)}")
 
     patch_doomgeneric_h(doom_h)
     print("[PATCH] doomgeneric.h -> keep classic 320x200 internal framebuffer")
-
     patch_config_h(config_h)
     print('[PATCH] config.h -> FILES_DIR "/littlefs"')
-
     patch_doomfeatures_h(features_h)
     print("[PATCH] doomfeatures.h -> force FEATURE_SOUND off")
-
     patch_i_system_c(i_system_c)
     print("[PATCH] i_system.c -> prefer PSRAM for Doom zone memory")
-
     patch_doomgeneric_c(doomgeneric_c)
     print("[PATCH] doomgeneric.c -> prefer PSRAM for Doom framebuffer")
+    patch_r_plane_c(r_plane_c)
+    print("[PATCH] r_plane.c -> move large renderer BSS buffers to PSRAM")
+    patch_r_bsp_c(r_bsp_c)
+    print("[PATCH] r_bsp.c -> move draw/clip BSS buffers to PSRAM")
+    patch_r_things_c(r_things_c)
+    print("[PATCH] r_things.c -> move sprite helper BSS buffers to PSRAM")
 
 
 def write_manifest(imported: Iterable[str]) -> None:
@@ -305,6 +368,7 @@ def write_manifest(imported: Iterable[str]) -> None:
         "- doomfeatures.h: FEATURE_SOUND explicitly disabled",
         "- i_system.c: Doom zone memory prefers ESP32 PSRAM via heap_caps_malloc",
         "- doomgeneric.c: Doom framebuffer prefers ESP32 PSRAM via heap_caps_malloc",
+        "- r_plane.c/r_bsp.c/r_things.c: large renderer static BSS buffers moved to PSRAM using EXT_RAM_BSS_ATTR",
         "",
         "Files:",
     ]
@@ -354,10 +418,10 @@ def main() -> int:
     print(f"[DONE] Imported {len(imported)} files into:")
     print(f"       {TARGET_DIR}")
     print(f"[INFO] Skipped {len(skipped)} non-core or desktop-specific files.")
-    print("[NEXT] Open Phase3_entry.ino in Arduino IDE and compile.")
-    print("       This imported tree is already patched for classic 320x200 Doom")
-    print("       rendering, /littlefs IWAD discovery, no-audio runtime mode,")
-    print("       and PSRAM-first zone/framebuffer allocation.")
+    print("[NEXT] Open ESP32Toy_DoomGeneric_Phase3.ino in Arduino IDE and compile.")
+    print("       This imported tree is patched for classic 320x200 Doom rendering,")
+    print("       /littlefs IWAD discovery, no-audio runtime mode, PSRAM-first")
+    print("       heap allocations, and external-RAM renderer BSS buffers.")
     return 0
 
 
