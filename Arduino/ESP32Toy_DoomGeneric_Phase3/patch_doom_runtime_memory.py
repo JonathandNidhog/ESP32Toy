@@ -14,6 +14,7 @@ renderer buffers:
 
 - r_plane.c: visplanes/openings/clipping/span/cache arrays become pointers
              allocated at runtime from PSRAM first, then normal calloc fallback.
+- r_plane.h: extern declarations for clipping/slope arrays are changed to pointers.
 - r_bsp.c:   drawsegs/solidsegs become pointers allocated at runtime.
 
 Run after fetch_doomgeneric_sources.py and before Arduino compile:
@@ -66,11 +67,43 @@ def ensure_heap_caps_include(text: str, anchor: str, label: str) -> str:
     )
 
 
+def patch_r_plane_header() -> None:
+    text = read("r_plane.h")
+
+    replacements = [
+        (
+            r"extern\s+short\s+floorclip\[SCREENWIDTH\];",
+            "extern short*\t\tfloorclip;",
+            "r_plane.h floorclip extern",
+        ),
+        (
+            r"extern\s+short\s+ceilingclip\[SCREENWIDTH\];",
+            "extern short*\t\tceilingclip;",
+            "r_plane.h ceilingclip extern",
+        ),
+        (
+            r"extern\s+fixed_t\s+yslope\[SCREENHEIGHT\];",
+            "extern fixed_t*\tyslope;",
+            "r_plane.h yslope extern",
+        ),
+        (
+            r"extern\s+fixed_t\s+distscale\[SCREENWIDTH\];",
+            "extern fixed_t*\tdistscale;",
+            "r_plane.h distscale extern",
+        ),
+    ]
+
+    for pattern, repl, label in replacements:
+        text = replace_regex(text, pattern, repl, label)
+
+    write("r_plane.h", text)
+    print("[PATCH] r_plane.h -> renderer extern arrays changed to pointers")
+
+
 def patch_r_plane() -> None:
     text = read("r_plane.c")
     text = ensure_heap_caps_include(text, "#include <stdlib.h>\n", "r_plane.c")
 
-    # Convert large renderer .bss arrays to pointers.
     patterns = [
         (r"(?:EXT_RAM_BSS_ATTR\s+)?visplane_t\s+visplanes\[MAXVISPLANES\];", "visplane_t*\t\t\tvisplanes;", "r_plane visplanes"),
         (r"(?:EXT_RAM_BSS_ATTR\s+)?short\s+openings\[MAXOPENINGS\];", "short*\t\t\topenings;", "r_plane openings"),
@@ -88,7 +121,6 @@ def patch_r_plane() -> None:
     for pattern, repl, label in patterns:
         text = replace_regex(text, pattern, repl, label)
 
-    # sizeof(pointer) would be wrong after conversion.
     text = text.replace(
         "memset (cachedheight, 0, sizeof(cachedheight));",
         "memset (cachedheight, 0, sizeof(*cachedheight) * SCREENHEIGHT);",
@@ -245,13 +277,14 @@ static void R_AllocSolidSegs(void)
 
 
 def main() -> int:
-    required = ["r_plane.c", "r_bsp.c"]
+    required = ["r_plane.c", "r_plane.h", "r_bsp.c"]
     missing = [name for name in required if not (ROOT / name).exists()]
     if missing:
         print("[ERROR] Missing imported Doom source file(s): " + ", ".join(missing))
         print("        Run fetch_doomgeneric_sources.py first.")
         return 2
 
+    patch_r_plane_header()
     patch_r_plane()
     patch_r_bsp()
     print("[DONE] Doom renderer static DRAM patch applied.")
