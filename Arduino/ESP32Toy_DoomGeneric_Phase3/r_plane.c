@@ -22,6 +22,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#include <esp_heap_caps.h>
+#endif
+
 #include "i_system.h"
 #include "z_zone.h"
 #include "w_wad.h"
@@ -43,14 +47,14 @@ planefunction_t		ceilingfunc;
 
 // Here comes the obnoxious "visplane".
 #define MAXVISPLANES	128
-visplane_t		visplanes[MAXVISPLANES];
+visplane_t*			visplanes;
 visplane_t*		lastvisplane;
 visplane_t*		floorplane;
 visplane_t*		ceilingplane;
 
 // ?
 #define MAXOPENINGS	SCREENWIDTH*64
-short			openings[MAXOPENINGS];
+short*			openings;
 short*			lastopening;
 
 
@@ -59,15 +63,15 @@ short*			lastopening;
 //  floorclip starts out SCREENHEIGHT
 //  ceilingclip starts out -1
 //
-short			floorclip[SCREENWIDTH];
-short			ceilingclip[SCREENWIDTH];
+short*			floorclip;
+short*			ceilingclip;
 
 //
 // spanstart holds the start of a plane span
 // initialized to 0 at start
 //
-int			spanstart[SCREENHEIGHT];
-int			spanstop[SCREENHEIGHT];
+int*			spanstart;
+int*			spanstop;
 
 //
 // texture mapping
@@ -75,15 +79,15 @@ int			spanstop[SCREENHEIGHT];
 lighttable_t**		planezlight;
 fixed_t			planeheight;
 
-fixed_t			yslope[SCREENHEIGHT];
-fixed_t			distscale[SCREENWIDTH];
+fixed_t*			yslope;
+fixed_t*			distscale;
 fixed_t			basexscale;
 fixed_t			baseyscale;
 
-fixed_t			cachedheight[SCREENHEIGHT];
-fixed_t			cacheddistance[SCREENHEIGHT];
-fixed_t			cachedxstep[SCREENHEIGHT];
-fixed_t			cachedystep[SCREENHEIGHT];
+fixed_t*			cachedheight;
+fixed_t*			cacheddistance;
+fixed_t*			cachedxstep;
+fixed_t*			cachedystep;
 
 
 
@@ -93,8 +97,55 @@ fixed_t			cachedystep[SCREENHEIGHT];
 //
 void R_InitPlanes (void)
 {
-  // Doh!
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#define ESP32TOY_DOOM_ALLOC_ARRAY(ptr, type, count)                                      \
+    do                                                                                   \
+    {                                                                                    \
+        if ((ptr) == NULL)                                                               \
+        {                                                                                \
+            (ptr) = (type*) heap_caps_calloc((count), sizeof(type),                      \
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);       \
+            if ((ptr) == NULL)                                                           \
+            {                                                                            \
+                (ptr) = (type*) calloc((count), sizeof(type));                           \
+            }                                                                            \
+            if ((ptr) == NULL)                                                           \
+            {                                                                            \
+                I_Error("R_InitPlanes: failed to allocate %s", #ptr);                    \
+            }                                                                            \
+        }                                                                                \
+    } while (0)
+#else
+#define ESP32TOY_DOOM_ALLOC_ARRAY(ptr, type, count)                                      \
+    do                                                                                   \
+    {                                                                                    \
+        if ((ptr) == NULL)                                                               \
+        {                                                                                \
+            (ptr) = (type*) calloc((count), sizeof(type));                               \
+            if ((ptr) == NULL)                                                           \
+            {                                                                            \
+                I_Error("R_InitPlanes: failed to allocate %s", #ptr);                    \
+            }                                                                            \
+        }                                                                                \
+    } while (0)
+#endif
+
+    ESP32TOY_DOOM_ALLOC_ARRAY(visplanes, visplane_t, MAXVISPLANES);
+    ESP32TOY_DOOM_ALLOC_ARRAY(openings, short, MAXOPENINGS);
+    ESP32TOY_DOOM_ALLOC_ARRAY(floorclip, short, SCREENWIDTH);
+    ESP32TOY_DOOM_ALLOC_ARRAY(ceilingclip, short, SCREENWIDTH);
+    ESP32TOY_DOOM_ALLOC_ARRAY(spanstart, int, SCREENHEIGHT);
+    ESP32TOY_DOOM_ALLOC_ARRAY(spanstop, int, SCREENHEIGHT);
+    ESP32TOY_DOOM_ALLOC_ARRAY(yslope, fixed_t, SCREENHEIGHT);
+    ESP32TOY_DOOM_ALLOC_ARRAY(distscale, fixed_t, SCREENWIDTH);
+    ESP32TOY_DOOM_ALLOC_ARRAY(cachedheight, fixed_t, SCREENHEIGHT);
+    ESP32TOY_DOOM_ALLOC_ARRAY(cacheddistance, fixed_t, SCREENHEIGHT);
+    ESP32TOY_DOOM_ALLOC_ARRAY(cachedxstep, fixed_t, SCREENHEIGHT);
+    ESP32TOY_DOOM_ALLOC_ARRAY(cachedystep, fixed_t, SCREENHEIGHT);
+
+#undef ESP32TOY_DOOM_ALLOC_ARRAY
 }
+
 
 
 //
@@ -191,7 +242,7 @@ void R_ClearPlanes (void)
     lastopening = openings;
     
     // texture calculation
-    memset (cachedheight, 0, sizeof(cachedheight));
+    memset (cachedheight, 0, sizeof(*cachedheight) * SCREENHEIGHT);
 
     // left to right mapping
     angle = (viewangle-ANG90)>>ANGLETOFINESHIFT;

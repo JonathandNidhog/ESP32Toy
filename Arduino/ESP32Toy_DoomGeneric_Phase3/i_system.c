@@ -21,6 +21,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#include <esp_heap_caps.h>
+#endif
+
 #include <stdarg.h>
 
 #ifdef _WIN32
@@ -116,7 +120,15 @@ static byte *AutoAllocMemory(int *size, int default_ram, int min_ram)
 
         *size = default_ram * 1024 * 1024;
 
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+        zonemem = heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (zonemem == NULL)
+        {
+            zonemem = malloc(*size);
+        }
+#else
         zonemem = malloc(*size);
+#endif
 
         // Failed to allocate?  Reduce zone size until we reach a size
         // that is acceptable.

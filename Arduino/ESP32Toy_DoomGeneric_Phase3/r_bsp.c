@@ -21,6 +21,10 @@
 
 #include "doomdef.h"
 
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#include <esp_heap_caps.h>
+#endif
+
 #include "m_bbox.h"
 
 #include "i_system.h"
@@ -43,9 +47,32 @@ line_t*		linedef;
 sector_t*	frontsector;
 sector_t*	backsector;
 
-drawseg_t	drawsegs[MAXDRAWSEGS];
+drawseg_t*	drawsegs;
 drawseg_t*	ds_p;
 
+
+
+static void R_AllocDrawSegs(void)
+{
+    if (drawsegs != NULL)
+    {
+        return;
+    }
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+    drawsegs = (drawseg_t*) heap_caps_calloc(MAXDRAWSEGS, sizeof(drawseg_t),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (drawsegs == NULL)
+    {
+        drawsegs = (drawseg_t*) calloc(MAXDRAWSEGS, sizeof(drawseg_t));
+    }
+#else
+    drawsegs = (drawseg_t*) calloc(MAXDRAWSEGS, sizeof(drawseg_t));
+#endif
+    if (drawsegs == NULL)
+    {
+        I_Error("R_AllocDrawSegs: failed to allocate drawsegs");
+    }
+}
 
 void
 R_StoreWallRange
@@ -60,6 +87,7 @@ R_StoreWallRange
 //
 void R_ClearDrawSegs (void)
 {
+    R_AllocDrawSegs();
     ds_p = drawsegs;
 }
 
@@ -82,10 +110,33 @@ typedef	struct
 
 // newend is one past the last valid seg
 cliprange_t*	newend;
-cliprange_t	solidsegs[MAXSEGS];
+cliprange_t*	solidsegs;
 
 
 
+
+
+static void R_AllocSolidSegs(void)
+{
+    if (solidsegs != NULL)
+    {
+        return;
+    }
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+    solidsegs = (cliprange_t*) heap_caps_calloc(MAXSEGS, sizeof(cliprange_t),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (solidsegs == NULL)
+    {
+        solidsegs = (cliprange_t*) calloc(MAXSEGS, sizeof(cliprange_t));
+    }
+#else
+    solidsegs = (cliprange_t*) calloc(MAXSEGS, sizeof(cliprange_t));
+#endif
+    if (solidsegs == NULL)
+    {
+        I_Error("R_AllocSolidSegs: failed to allocate solidsegs");
+    }
+}
 
 //
 // R_ClipSolidWallSegment
@@ -237,6 +288,7 @@ R_ClipPassWallSegment
 //
 void R_ClearClipSegs (void)
 {
+    R_AllocSolidSegs();
     solidsegs[0].first = -0x7fffffff;
     solidsegs[0].last = -1;
     solidsegs[1].first = viewwidth;
