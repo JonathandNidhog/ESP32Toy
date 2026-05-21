@@ -48,6 +48,9 @@
 #ifndef KEY_ESCAPE
 #define KEY_ESCAPE 27
 #endif
+#ifndef KEY_ENTER
+#define KEY_ENTER 13
+#endif
 #ifndef KEY_TAB
 #define KEY_TAB 9
 #endif
@@ -385,12 +388,14 @@ static void updateDigitalKeys() {
   const bool leftSW = debouncedPressed(LEFT_JOY_SW_PIN, &leftSWRawPrev, &leftSWStable, &leftSWChangedAt);
 
   // DoomGeneric keyboard mapping for the ESP32Toy hardware:
-  //   A button          -> fire
-  //   B button          -> use / open door
+  //   A button          -> fire in-game + enter/confirm in menus
+  //   B button          -> use/open door in-game + escape/back in menus
   //   Old/right SW      -> run modifier
   //   New/left SW       -> automap toggle
   setDoomKey(KEY_FIRE, a);
+  setDoomKey(KEY_ENTER, a);
   setDoomKey(KEY_USE, b);
+  setDoomKey(KEY_ESCAPE, b);
   setDoomKey(KEY_RSHIFT, rightSW);
   setDoomKey(KEY_TAB, leftSW);
 
