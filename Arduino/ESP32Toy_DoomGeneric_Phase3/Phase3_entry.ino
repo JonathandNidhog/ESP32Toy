@@ -1,34 +1,16 @@
-#include <Arduino.h>
-#include "doomgeneric_esp32toy.h"
-
-static bool doomStarted = false;
-
-void setup() {
-  ESP32Toy_DoomPlatformInitHardware();
-
-  if (!ESP32Toy_DoomPlatformReadyToStart()) {
-    doomStarted = false;
-    return;
-  }
-
-  static char arg0[] = "esp32toy";
-  static char arg1[] = "-iwad";
-  static char arg2[] = "/littlefs/doom1.wad";
-  static char arg3[] = "-nosound";
-  static char *argv[] = { arg0, arg1, arg2, arg3 };
-
-  doomgeneric_Create(4, argv);
-  doomStarted = true;
-}
-
-void loop() {
-  if (!doomStarted) {
-    ESP32Toy_DoomPlatformIdle();
-    delay(30);
-    return;
-  }
-
-  ESP32Toy_DoomPlatformBeforeTick();
-  doomgeneric_Tick();
-  ESP32Toy_DoomPlatformAfterTick();
-}
+// This file is intentionally not the active Arduino sketch entry.
+//
+// Open this folder using the correctly named sketch file instead:
+//
+//   ESP32Toy_DoomGeneric_Phase3.ino
+//
+// Arduino IDE expects the main .ino file name to match the folder name.
+// If you open Phase3_entry.ino directly, the IDE may copy it into a new
+// Phase3_entry folder and compile only that file, causing linker errors such as:
+//
+//   undefined reference to `doomgeneric_Create'
+//   undefined reference to `doomgeneric_Tick'
+//
+// The active setup()/loop() implementation lives in:
+//
+//   ESP32Toy_DoomGeneric_Phase3.ino
