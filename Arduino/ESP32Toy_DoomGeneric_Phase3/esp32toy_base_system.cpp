@@ -4,14 +4,14 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
-// Keep this small base-system layer independent from DoomGeneric internals.
+// Base System reuses the screen object initialized by doomgeneric_esp32toy.cpp.
+// Do not create or initialize a second FSPI/ST7735 instance here; doing so can
+// leave the panel black after the Doom boot check screen.
+extern Adafruit_ST7735 tft;
+#define osTft tft
+
 // It uses the same physical hardware pins as the Doom platform bridge.
-#define OS_TFT_MOSI 11
-#define OS_TFT_SCLK 12
-#define OS_TFT_CS   10
-#define OS_TFT_DC    9
 #define OS_TFT_BL   21
-#define OS_TFT_RST  -1
 
 #define OS_RIGHT_JOY_X_PIN 16
 #define OS_RIGHT_JOY_Y_PIN  8
@@ -22,17 +22,12 @@
 #define OS_LEFT_JOY_Y_PIN  18
 #define OS_LEFT_JOY_SW_PIN 13
 
-#define OS_TFT_ROTATION 3
-
 static const int kOSW = 160;
 static const int kOSH = 128;
 static const int kWaterCols = 40;
 static const int kWaterRows = 32;
 static const int kCellW = 4;
 static const int kCellH = 4;
-
-static SPIClass osSPI(FSPI);
-static Adafruit_ST7735 osTft(&osSPI, OS_TFT_CS, OS_TFT_DC, OS_TFT_RST);
 
 static bool osDisplayReady = false;
 static uint8_t selectedItem = 0;
@@ -96,6 +91,8 @@ static void osDrawCentered(int y, const char *text, uint16_t color, uint8_t size
 static void osEnsureHardware(void) {
   if (osDisplayReady) return;
 
+  // DoomPlatformInitHardware() already initialized SPI and the ST7735 panel.
+  // Base OS only keeps pins ready and marks the shared display as available.
   pinMode(OS_TFT_BL, OUTPUT);
   digitalWrite(OS_TFT_BL, HIGH);
 
@@ -107,11 +104,6 @@ static void osEnsureHardware(void) {
   pinMode(OS_LEFT_JOY_SW_PIN, INPUT_PULLUP);
   pinMode(OS_KEY_A_PIN, INPUT_PULLUP);
   pinMode(OS_KEY_B_PIN, INPUT_PULLUP);
-
-  osSPI.begin(OS_TFT_SCLK, -1, OS_TFT_MOSI, OS_TFT_CS);
-  osTft.initR(INITR_BLACKTAB);
-  osTft.setRotation(OS_TFT_ROTATION);
-  osTft.fillScreen(ST77XX_BLACK);
 
   osDisplayReady = true;
 }
