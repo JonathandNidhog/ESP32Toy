@@ -39,7 +39,7 @@ CHOCOLATE_DOOM_BASES = (
     "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src/doom",
     "https://raw.githubusercontent.com/chocolate-doom/chocolate-doom/master/src",
 )
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/2.1"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/2.2"
 TARGET_DIR = Path(__file__).resolve().parent
 MAX_DOWNLOAD_RETRIES = 5
 
@@ -77,19 +77,29 @@ DESKTOP_ONLY_BASENAMES = {
     "SDL_version.h", "SDL_video.h",
 }
 
+STANDARD_LIBRARY_HEADERS = {
+    "assert.h", "ctype.h", "errno.h", "float.h", "limits.h", "locale.h",
+    "math.h", "setjmp.h", "signal.h", "stdarg.h", "stdbool.h", "stddef.h",
+    "stdint.h", "stdio.h", "stdlib.h", "string.h", "time.h", "unistd.h",
+    "fcntl.h", "sys/stat.h", "sys/types.h",
+}
+
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.h)"', re.MULTILINE)
 
 
-def is_desktop_only_header(name: str) -> bool:
+def is_ignored_header(name: str) -> bool:
     normalized = name.replace("\\", "/")
     lower = normalized.lower()
-    base = Path(normalized).name
+    base = Path(normalized).name.lower()
+    original_base = Path(normalized).name
     return (
-        base in DESKTOP_ONLY_BASENAMES
+        original_base in DESKTOP_ONLY_BASENAMES
         or lower.startswith("sdl/")
         or lower.startswith("sdl2/")
         or lower.startswith("sdl3/")
-        or base.lower().startswith("sdl_")
+        or base.startswith("sdl_")
+        or lower in STANDARD_LIBRARY_HEADERS
+        or base in STANDARD_LIBRARY_HEADERS
     )
 
 
@@ -163,13 +173,13 @@ def collect_reachable_local_headers() -> set[str]:
         queue.extend(scan_quoted_includes(TARGET_DIR / c_name))
     while queue:
         name = queue.pop(0)
-        if is_desktop_only_header(name) or name in reachable:
+        if is_ignored_header(name) or name in reachable:
             continue
         reachable.add(name)
         header_path = TARGET_DIR / name
         if header_path.exists():
             for child in scan_quoted_includes(header_path):
-                if not is_desktop_only_header(child) and child not in reachable:
+                if not is_ignored_header(child) and child not in reachable:
                     queue.append(child)
     return reachable
 
@@ -194,7 +204,7 @@ def fetch_missing_reachable_headers_from_chocolate(imported: list[str], force: b
     for _ in range(20):
         missing = sorted(
             name for name in collect_reachable_local_headers()
-            if not is_desktop_only_header(name) and not (TARGET_DIR / name).exists()
+            if not is_ignored_header(name) and not (TARGET_DIR / name).exists()
         )
         if not missing:
             return
@@ -216,7 +226,7 @@ def fetch_missing_reachable_headers_from_chocolate(imported: list[str], force: b
                 imported.append(name)
     unresolved = sorted(
         name for name in collect_reachable_local_headers()
-        if not is_desktop_only_header(name) and not (TARGET_DIR / name).exists()
+        if not is_ignored_header(name) and not (TARGET_DIR / name).exists()
     )
     if unresolved:
         raise RuntimeError(f"Unresolved reachable headers after fallback import: {', '.join(unresolved)}")
@@ -355,7 +365,7 @@ def write_manifest(imported: Iterable[str]) -> None:
         "Imported from https://github.com/ozkl/doomgeneric/tree/master/doomgeneric",
         "Fallback headers may be imported from https://github.com/chocolate-doom/chocolate-doom",
         "Source selection: all ozkl headers + selected core C files + missing reachable Chocolate Doom headers.",
-        "Desktop-only SDL/SDL2 dependencies are intentionally ignored.",
+        "Desktop-only SDL/SDL2 dependencies and compiler-provided standard headers are intentionally ignored.",
         "",
         "ESP32Toy post-import patches:",
         "- classic 320x200 internal framebuffer",
