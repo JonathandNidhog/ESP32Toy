@@ -1,4 +1,10 @@
 #include <Arduino.h>
+
+#if !__has_include("doomgeneric.h")
+#error "DoomGeneric core is missing. Run: python fetch_doomgeneric_sources.py inside Arduino/ESP32Toy_DoomGeneric_Phase3, then reopen/compile ESP32Toy_DoomGeneric_Phase3.ino."
+#endif
+
+#include "doomgeneric.h"
 #include "doomgeneric_esp32toy.h"
 
 static bool doomStarted = false;
