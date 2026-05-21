@@ -37,7 +37,7 @@ static uint32_t aChangedAt = 0, bChangedAt = 0, swChangedAt = 0;
 
 static uint32_t motorUntilMs = 0;
 static uint32_t ledFlashUntilMs = 0;
-static uint8_t ledPhase = 0;
+static uint16_t currentWaterCountForColor = 96;
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -144,18 +144,14 @@ static void ledAll(uint8_t r, uint8_t g, uint8_t b) {
 }
 static void updateLED() {
   uint32_t now = millis();
-  if (now < ledFlashUntilMs) {
-    ledAll(edgeRGB[colorIndex][0], edgeRGB[colorIndex][1], edgeRGB[colorIndex][2]);
-    return;
-  }
-  ledPhase++;
-  uint8_t s = (uint8_t)(18 + (sinf(ledPhase * 0.09f) + 1.0f) * 18.0f);
-  ledAll((waterRGB[colorIndex][0] * s) / 64, (waterRGB[colorIndex][1] * s) / 64, (waterRGB[colorIndex][2] * s) / 64);
+  uint8_t scale = 7; // low constant brightness, not breathing/flashing
+  if (now < ledFlashUntilMs) scale = 16;
+  ledAll((waterRGB[colorIndex][0] * scale) / 64, (waterRGB[colorIndex][1] * scale) / 64, (waterRGB[colorIndex][2] * scale) / 64);
 }
 static void nextColor() {
   colorIndex = (colorIndex + 1) % COLOR_COUNT;
-  ledFlashUntilMs = millis() + 200;
-  motorPulse(150);
+  ledFlashUntilMs = millis() + 120;
+  motorPulse(260);
 }
 
 // ---------- MPU6050 ----------
@@ -200,11 +196,11 @@ static void initMPU() {
 static void mapToScreen(float bx, float by, float *ox, float *oy) { *ox = -by; *oy = bx; }
 
 // ---------- Water solver ----------
-static const int N_MIN = 48, N_MAX = 120;
-static int nWater = 88;
+static const int N_MIN = 64, N_MAX = 148;
+static int nWater = 108;
 static const float R = 4.0f;
 static float wx[N_MAX], wy[N_MAX], wvx[N_MAX], wvy[N_MAX];
-static const int DROP_MAX = 22;
+static const int DROP_MAX = 24;
 static bool dropOn[DROP_MAX];
 static float dxp[DROP_MAX], dyp[DROP_MAX], dvx[DROP_MAX], dvy[DROP_MAX], dr[DROP_MAX];
 static int dlife[DROP_MAX];
@@ -213,11 +209,11 @@ static const int STEP = 2;
 static const int FW = WL_W / STEP + 3;
 static const int FH = WL_H / STEP + 3;
 static uint16_t field[FW * FH];
-static const int KR_MAX = 12;
-static int kr = 10, krBuilt = -1;
+static const int KR_MAX = 13;
+static int kr = 11, krBuilt = -1;
 static uint16_t kernel[(KR_MAX * 2 + 1) * (KR_MAX * 2 + 1)];
 static float forceX = 0, forceY = 0, joyFX = 0, joyFY = 0, potFilt = 0;
-static const uint16_t THRESH = 430, FOAM = 1750;
+static const uint16_t THRESH = 410, FOAM = 1850;
 
 static void buildKernel() {
   memset(kernel, 0, sizeof(kernel));
@@ -225,22 +221,22 @@ static void buildKernel() {
   float rp = kr * STEP, r2 = rp * rp;
   for (int y = -kr; y <= kr; ++y) for (int x = -kr; x <= kr; ++x) {
     float px = x * STEP, py = y * STEP, d2 = px * px + py * py;
-    if (d2 < r2) { float t = 1.0f - d2 / r2; kernel[(y + kr) * ks + (x + kr)] = (uint16_t)(t * t * 1240.0f); }
+    if (d2 < r2) { float t = 1.0f - d2 / r2; kernel[(y + kr) * ks + (x + kr)] = (uint16_t)(t * t * 1320.0f); }
   }
   krBuilt = kr;
 }
 
 static void resetWater() {
   if (krBuilt != kr) buildKernel();
-  int id = 0, cols = 13, rows = (N_MAX + cols - 1) / cols;
-  float sx = (WL_W - (cols - 1) * 10.2f) * 0.5f;
-  float sy = WL_H - (rows - 1) * 6.2f - 7.0f;
+  int id = 0, cols = 14, rows = (N_MAX + cols - 1) / cols;
+  float sx = (WL_W - (cols - 1) * 9.4f) * 0.5f;
+  float sy = WL_H - (rows - 1) * 5.8f - 5.0f;
   for (int y = 0; y < rows; ++y) for (int x = 0; x < cols; ++x) {
     if (id >= N_MAX) break;
-    wx[id] = sx + x * 10.2f + random(-1, 2); wy[id] = sy + y * 6.2f + random(-1, 2); wvx[id] = wvy[id] = 0; id++;
+    wx[id] = sx + x * 9.4f + random(-1, 2); wy[id] = sy + y * 5.8f + random(-1, 2); wvx[id] = wvy[id] = 0; id++;
   }
   for (int i = 0; i < DROP_MAX; ++i) { dropOn[i] = false; dlife[i] = 0; }
-  forceX = forceY = joyFX = joyFY = 0; splashCooldown = 0; nWater = 88;
+  forceX = forceY = joyFX = joyFY = 0; splashCooldown = 0; nWater = 108; currentWaterCountForColor = nWater;
   lastAX = ax; lastAY = ay; lastAZ = az;
 }
 
@@ -249,13 +245,13 @@ static void updateAmount() {
   potFilt = potFilt <= 0.1f ? raw : potFilt * 0.90f + raw * 0.10f;
   float t = clampf2(potFilt / 4095.0f, 0, 1);
   int target = constrain(N_MIN + (int)(t * (N_MAX - N_MIN)), N_MIN, N_MAX);
-  int targetKr = constrain(8 + (int)(t * 4.0f + 0.5f), 8, 12);
+  int targetKr = constrain(9 + (int)(t * 4.0f + 0.5f), 9, 13);
   if (target > nWater) for (int i = nWater; i < target; ++i) {
     int ref = random(0, max(1, nWater));
     wx[i] = clampf2(wx[ref] + random(-8, 9), R, WL_W - 1 - R); wy[i] = clampf2(wy[ref] + random(-8, 9), R, WL_H - 1 - R);
     wvx[i] = wvx[ref] * 0.15f; wvy[i] = wvy[ref] * 0.15f;
   }
-  nWater = target; kr = targetKr; if (kr != krBuilt) buildKernel();
+  nWater = target; currentWaterCountForColor = nWater; kr = targetKr; if (kr != krBuilt) buildKernel();
 }
 static void constrainP(int i) {
   float b = -0.20f;
@@ -263,7 +259,7 @@ static void constrainP(int i) {
   if (wy[i] < R) { wy[i] = R; wvy[i] *= b; } if (wy[i] > WL_H - 1 - R) { wy[i] = WL_H - 1 - R; wvy[i] *= b; }
 }
 static void solvePairs() {
-  float td = R * 1.50f, td2 = td * td;
+  float td = R * 1.43f, td2 = td * td;
   for (int i = 0; i < nWater; ++i) for (int j = i + 1; j < nWater; ++j) {
     float x = wx[j] - wx[i], y = wy[j] - wy[i], d2 = x*x + y*y; if (d2 < 0.0001f || d2 >= td2) continue;
     float d = sqrtf(d2), p = (td - d) * 0.47f, nx = x / d, ny = y / d;
@@ -271,20 +267,20 @@ static void solvePairs() {
   }
 }
 static void viscosity() {
-  float rsq = R * R * 7.0f;
+  float rsq = R * R * 7.2f;
   for (int i = 0; i < nWater; ++i) for (int j = i + 1; j < nWater; ++j) {
     float x = wx[j]-wx[i], y = wy[j]-wy[i]; if (x*x+y*y >= rsq) continue;
     float vx = wvx[j]-wvx[i], vy = wvy[j]-wvy[i];
-    wvx[i] += vx*0.024f; wvy[i] += vy*0.024f; wvx[j] -= vx*0.024f; wvy[j] -= vy*0.024f;
+    wvx[i] += vx*0.026f; wvy[i] += vy*0.026f; wvx[j] -= vx*0.026f; wvy[j] -= vy*0.026f;
   }
 }
 static void spawnDrop(float x, float y, float vx, float vy, float r) {
   for (int i=0;i<DROP_MAX;++i) if(!dropOn[i]) { dropOn[i]=true; dxp[i]=x; dyp[i]=y; dvx[i]=vx; dvy[i]=vy; dr[i]=r; dlife[i]=78; return; }
 }
 static void splash(float fx, float fy, float s) {
-  motorPulse(80); ledFlashUntilMs = millis() + 120;
+  motorPulse(180); ledFlashUntilMs = millis() + 90;
   float l=sqrtf(fx*fx+fy*fy), ux=0, uy=-1; if(l>0.05f){ux=-fx/l; uy=-fy/l;}
-  for(int n=0;n<constrain((int)(s*1.55f),4,8);++n){ int id=random(0,nWater); float side=random(-100,101)/100.0f; float sx=-uy, sy=ux;
+  for(int n=0;n<constrain((int)(s*1.55f),4,9);++n){ int id=random(0,nWater); float side=random(-100,101)/100.0f; float sx=-uy, sy=ux;
     spawnDrop(wx[id], wy[id], wvx[id]+ux*(0.92f+s*0.44f)+sx*side*(0.52f+s*0.12f), wvy[id]+uy*(0.92f+s*0.44f)+sy*side*(0.52f+s*0.12f), random(1,3));
   }
 }
@@ -299,7 +295,7 @@ static void buildField() {
   memset(field,0,sizeof(field)); int ks=kr*2+1;
   for(int i=0;i<nWater;++i){int cx=(int)(wx[i]/STEP), cy=(int)(wy[i]/STEP); for(int yy=-kr;yy<=kr;++yy){int fy=cy+yy; if(fy<0||fy>=FH)continue; for(int xx=-kr;xx<=kr;++xx){int fx=cx+xx; if(fx<0||fx>=FW)continue; uint16_t add=kernel[(yy+kr)*ks+(xx+kr)]; if(!add)continue; int idx=fy*FW+fx; uint32_t v=field[idx]+add; field[idx]=v>65535?65535:v;}}}
 }
-static uint16_t densityColor(uint16_t d,int y){uint16_t base=waterColor(), edge=edgeColor(), dark=blend565(base,rgb565(0,0,12),185), mid=blend565(base,edge,76); int sh=(frameId+y*3)&15; if(d>FOAM)return sh<4?edge:blend565(base,edge,150); if(d>1000)return sh<3?mid:base; return sh<2?base:dark;}
+static uint16_t densityColor(uint16_t d,int y){uint16_t base=waterColor(), edge=edgeColor(); float amountT=clampf2((currentWaterCountForColor-N_MIN)/(float)(N_MAX-N_MIN),0,1); uint8_t shallowBoost=(uint8_t)((1.0f-amountT)*135.0f); uint16_t center=blend565(base,rgb565(0,0,18),(uint8_t)(120+amountT*82)); uint16_t mid=blend565(base,edge,(uint8_t)(70+shallowBoost/3)); uint16_t light=blend565(base,edge,(uint8_t)(155+shallowBoost/2)); if(amountT<0.22f)return blend565(base,edge,210); if(d>FOAM)return edge; if(d>1400)return center; if(d>900)return mid; return light;}
 static void drawWater() {
   clearFB(rgb565(0,0,7)); buildField(); uint16_t edge=edgeColor(), foam=blend565(edge,ST77XX_WHITE,110);
   for(int y=0;y<FH;++y){int rs=-1; uint16_t col=waterColor(); for(int x=0;x<FW;++x){uint16_t d=field[y*FW+x]; bool inside=d>=THRESH; if(inside&&rs<0){rs=x;col=densityColor(d,y);} bool last=x==FW-1; if((!inside||last)&&rs>=0){int re=(inside&&last)?x:x-1; rectFB(rs*STEP,y*STEP,(re-rs+1)*STEP,STEP,col); rs=-1;}}}
@@ -307,7 +303,7 @@ static void drawWater() {
   for(int i=0;i<DROP_MAX;++i)if(dropOn[i]){circleFB((int)dxp[i],(int)dyp[i],(int)dr[i],edge); if(dr[i]>=2)px((int)dxp[i]-1,(int)dyp[i]-1,ST77XX_WHITE);} pushFB();
 }
 static void stepWater(bool manual) {
-  updateAmount(); float jx=dz(clampf2((analogRead(WL_LEFT_JOY_X_PIN)-2048)/1800.0f,-1,1),0.14f), jy=dz(clampf2((analogRead(WL_LEFT_JOY_Y_PIN)-2048)/1800.0f,-1,1)*-1,0.14f); joyFX=joyFX*0.8f+jx*0.2f; joyFY=joyFY*0.8f+jy*0.2f;
+  updateAmount(); float jx=dz(clampf2((analogRead(WL_LEFT_JOY_X_PIN)-2048)/1800.0f,-1,1),0.14f), jy=dz(clampf2((analogRead(WL_LEFT_JOY_Y_PIN)-2048)/1800.0f,-1,1),0.14f); joyFX=joyFX*0.8f+jx*0.2f; joyFY=joyFY*0.8f+jy*0.2f;
   bool ok=readMPU(); float tx=0,ty=0,gsx=0,gsy=0,ss=0; if(ok){float bx=ax-biasAX, by=-(ay-biasAY); if(fabsf(bx)<0.03f)bx=0; if(fabsf(by)<0.03f)by=0; mapToScreen(clampf2(bx*2.1f,-1,1),clampf2(by*2.1f,-1,1),&tx,&ty); mapToScreen(clampf2(gx*0.008f,-1.3f,1.3f),clampf2(gy*0.008f,-1.3f,1.3f),&gsx,&gsy); float jerk=fabsf(ax-lastAX)+fabsf(ay-lastAY)+fabsf(az-lastAZ); lastAX=ax;lastAY=ay;lastAZ=az; ss=jerk*6.5f+fabsf(gx)*0.0028f+fabsf(gy)*0.0028f+fabsf(gz)*0.0018f;}
   forceX=forceX*0.84f+clampf2(tx+joyFX*0.75f,-1.35f,1.35f)*0.16f; forceY=forceY*0.84f+clampf2(ty+joyFY*0.75f,-1.35f,1.35f)*0.16f;
   for(int i=0;i<nWater;++i){wvx[i]+=forceX*0.27f+gsx*0.18f; wvy[i]+=forceY*0.27f+gsy*0.18f+0.012f; wvx[i]*=0.986f; wvy[i]*=0.986f; wvx[i]=clampf2(wvx[i],-4.2f,4.2f); wvy[i]=clampf2(wvy[i],-4.2f,4.2f); wx[i]+=wvx[i]; wy[i]+=wvy[i]; constrainP(i);} solvePairs(); solvePairs(); solvePairs(); for(int i=0;i<nWater;++i)constrainP(i); viscosity(); updateDrops(); if(splashCooldown>0)splashCooldown--; if(ss>1.25f&&splashCooldown<=0){splash(forceX+gsx*0.35f,forceY+gsy*0.35f,ss);splashCooldown=9;} if(manual&&splashCooldown<=0){splash(forceX,forceY,2.0f);splashCooldown=8;}
@@ -316,10 +312,10 @@ static void stepWater(bool manual) {
 bool ESP32Toy_WaterLabV2Tick(void) {
   if (!hardwareReady) { pinMode(WL_MOTOR_PIN, OUTPUT); motorWrite(false); pinMode(WL_KEY_A_PIN, INPUT_PULLUP); pinMode(WL_KEY_B_PIN, INPUT_PULLUP); pinMode(WL_LEFT_JOY_SW_PIN, INPUT_PULLUP); pinMode(WL_LEFT_JOY_X_PIN, INPUT); pinMode(WL_LEFT_JOY_Y_PIN, INPUT); pinMode(WL_POT_PIN, INPUT); allocFB(); initMPU(); hardwareReady = true; }
   updateMotor(); updateLED();
-  if (!initialized) { resetWater(); clearFB(rgb565(0,0,7)); pushFB(); lastFrameMs = 0; initialized = true; }
+  if (!initialized) { resetWater(); clearFB(rgb565(0,0,7)); pushFB(); lastFrameMs = 0; motorPulse(180); ledFlashUntilMs = millis() + 120; initialized = true; }
   bool a=debounced(WL_KEY_A_PIN,&aRawPrev,&aStable,&aChangedAt), b=debounced(WL_KEY_B_PIN,&bRawPrev,&bStable,&bChangedAt), sw=debounced(WL_LEFT_JOY_SW_PIN,&swRawPrev,&swStable,&swChangedAt);
   bool ap=a&&!aPrev, bp=b&&!bPrev, sp=sw&&!swPrev; aPrev=a; bPrev=b; swPrev=sw;
   if (ap) nextColor();
-  if (bp) { initialized=false; motorPulse(120); ledAll(0,0,0); return true; }
+  if (bp) { initialized=false; motorPulse(220); ledAll(0,0,0); return true; }
   uint32_t now=millis(); if(now-lastFrameMs<32)return false; lastFrameMs=now; frameId++; stepWater(sp); drawWater(); return false;
 }
