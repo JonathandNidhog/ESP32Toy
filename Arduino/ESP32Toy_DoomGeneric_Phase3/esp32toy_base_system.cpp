@@ -3,16 +3,17 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
+#include <math.h>
+#include <string.h>
 
 // Base System reuses the screen object initialized by doomgeneric_esp32toy.cpp.
-// Do not create or initialize a second FSPI/ST7735 instance here; doing so can
-// leave the panel black after the Doom boot check screen.
+// Do not create or initialize a second FSPI/ST7735 instance here.
 extern Adafruit_ST7735 tft;
 #define osTft tft
 
-// It uses the same physical hardware pins as the Doom platform bridge.
+// Same physical hardware pins as the Doom platform bridge.
 #define OS_TFT_BL   21
-
+#define OS_POT_PIN   1
 #define OS_RIGHT_JOY_X_PIN 16
 #define OS_RIGHT_JOY_Y_PIN  8
 #define OS_RIGHT_JOY_SW_PIN 6
@@ -24,10 +25,6 @@ extern Adafruit_ST7735 tft;
 
 static const int kOSW = 160;
 static const int kOSH = 128;
-static const int kWaterCols = 40;
-static const int kWaterRows = 32;
-static const int kCellW = 4;
-static const int kCellH = 4;
 
 static bool osDisplayReady = false;
 static uint8_t selectedItem = 0;
@@ -48,13 +45,6 @@ static bool aPrev = false;
 static bool bPrev = false;
 static bool leftSWPrev = false;
 
-static float waterA[kWaterRows][kWaterCols];
-static float waterB[kWaterRows][kWaterCols];
-static float waterVX = 0.0f;
-static float waterVY = 0.0f;
-static int waterCX = kWaterCols / 2;
-static int waterCY = kWaterRows / 2;
-
 static uint16_t osRGB565(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
@@ -63,6 +53,13 @@ static float osClamp(float v, float lo, float hi) {
   if (v < lo) return lo;
   if (v > hi) return hi;
   return v;
+}
+
+static float osDeadzone(float v, float dz) {
+  if (fabsf(v) <= dz) return 0.0f;
+  const float s = v >= 0.0f ? 1.0f : -1.0f;
+  const float t = (fabsf(v) - dz) / (1.0f - dz);
+  return s * osClamp(t, 0.0f, 1.0f);
 }
 
 static bool osDebouncedPressed(int pin, bool *rawPrev, bool *stable, uint32_t *changedAt) {
@@ -91,11 +88,10 @@ static void osDrawCentered(int y, const char *text, uint16_t color, uint8_t size
 static void osEnsureHardware(void) {
   if (osDisplayReady) return;
 
-  // DoomPlatformInitHardware() already initialized SPI and the ST7735 panel.
-  // Base OS only keeps pins ready and marks the shared display as available.
   pinMode(OS_TFT_BL, OUTPUT);
   digitalWrite(OS_TFT_BL, HIGH);
 
+  pinMode(OS_POT_PIN, INPUT);
   pinMode(OS_RIGHT_JOY_X_PIN, INPUT);
   pinMode(OS_RIGHT_JOY_Y_PIN, INPUT);
   pinMode(OS_LEFT_JOY_X_PIN, INPUT);
@@ -195,12 +191,8 @@ ESP32Toy_OSAction ESP32Toy_OSLauncherTick(bool doomReady) {
 
   if (aPressed || (leftSWDown && !leftSWPrev)) {
     leftSWPrev = leftSWDown;
-    if (selectedItem == 0) {
-      return ESP32TOY_OS_ACTION_START_WATER;
-    }
-    if (doomReady) {
-      return ESP32TOY_OS_ACTION_START_DOOM;
-    }
+    if (selectedItem == 0) return ESP32TOY_OS_ACTION_START_WATER;
+    if (doomReady) return ESP32TOY_OS_ACTION_START_DOOM;
     warningUntilMs = now + 1200;
     ESP32Toy_OSRedrawLauncher(doomReady);
     return ESP32TOY_OS_ACTION_NONE;
@@ -211,42 +203,372 @@ ESP32Toy_OSAction ESP32Toy_OSLauncherTick(bool doomReady) {
   return ESP32TOY_OS_ACTION_NONE;
 }
 
-static void waterReset(void) {
-  memset(waterA, 0, sizeof(waterA));
-  memset(waterB, 0, sizeof(waterB));
-  waterVX = 0.0f;
-  waterVY = 0.0f;
-  waterCX = kWaterCols / 2;
-  waterCY = kWaterRows / 2;
-}
+// ============================================================
+// Fullscreen LiquidOS-style water simulation
+// Particle solver + density field + metaball rendering.
+// ============================================================
+static const int WATER_COUNT_MIN = 42;
+static const int WATER_COUNT_MAX = 108;
+static int activeWaterCount = 82;
 
-static void waterSplash(int x, int y, float amount) {
-  if (x < 2 || x >= kWaterCols - 2 || y < 2 || y >= kWaterRows - 2) return;
-  waterA[y][x] += amount;
-  waterA[y - 1][x] += amount * 0.45f;
-  waterA[y + 1][x] += amount * 0.45f;
-  waterA[y][x - 1] += amount * 0.45f;
-  waterA[y][x + 1] += amount * 0.45f;
-}
+static const float WATER_RADIUS = 4.0f;
+static float wx[WATER_COUNT_MAX];
+static float wy[WATER_COUNT_MAX];
+static float wvx[WATER_COUNT_MAX];
+static float wvy[WATER_COUNT_MAX];
 
-static void waterDraw(void) {
-  for (int y = 0; y < kWaterRows; ++y) {
-    for (int x = 0; x < kWaterCols; ++x) {
-      float h = waterA[y][x];
-      h = osClamp(h, -1.0f, 1.0f);
-      const uint8_t blue = (uint8_t)(75 + fabsf(h) * 150);
-      const uint8_t green = (uint8_t)(20 + max(0.0f, h) * 85);
-      const uint8_t red = (uint8_t)(max(0.0f, -h) * 35);
-      osTft.fillRect(x * kCellW, y * kCellH, kCellW, kCellH, osRGB565(red, green, blue));
+static const int DROP_COUNT_MAX = 14;
+static bool dropActive[DROP_COUNT_MAX];
+static float dropX[DROP_COUNT_MAX];
+static float dropY[DROP_COUNT_MAX];
+static float dropVX[DROP_COUNT_MAX];
+static float dropVY[DROP_COUNT_MAX];
+static float dropRadius[DROP_COUNT_MAX];
+static int dropLife[DROP_COUNT_MAX];
+static int splashCooldown = 0;
+
+static const int GRID_STEP = 2;
+static const int FIELD_W = kOSW / GRID_STEP + 3;
+static const int FIELD_H = kOSH / GRID_STEP + 3;
+static uint16_t densityField[FIELD_W * FIELD_H];
+
+static const int KERNEL_R_MIN = 8;
+static const int KERNEL_R_MAX = 11;
+static const int KERNEL_MAX_SIZE = KERNEL_R_MAX * 2 + 1;
+static int kernelR = 9;
+static int kernelBuiltR = -1;
+static uint16_t kernel[KERNEL_MAX_SIZE * KERNEL_MAX_SIZE];
+static const uint16_t FIELD_THRESHOLD = 455;
+
+static float forceX = 0.0f;
+static float forceY = 0.0f;
+static float potFiltered = 0.0f;
+static uint32_t waterFrame = 0;
+
+static const uint16_t C_WATER = 0x3D7F;      // bright blue
+static const uint16_t C_WATER_DEEP = 0x01B1; // dark blue
+static const uint16_t C_EDGE = 0xB73F;       // pale highlight
+static const uint16_t C_BG_WATER = 0x0007;   // nearly black blue
+
+static void waterBuildKernel() {
+  memset(kernel, 0, sizeof(kernel));
+  const float radiusPx = kernelR * GRID_STEP;
+  const float radiusSq = radiusPx * radiusPx;
+  const int kernelSize = kernelR * 2 + 1;
+
+  for (int ky = -kernelR; ky <= kernelR; ++ky) {
+    for (int kx = -kernelR; kx <= kernelR; ++kx) {
+      const float px = kx * GRID_STEP;
+      const float py = ky * GRID_STEP;
+      const float d2 = px * px + py * py;
+      if (d2 < radiusSq) {
+        const float t = 1.0f - d2 / radiusSq;
+        kernel[(ky + kernelR) * kernelSize + (kx + kernelR)] = (uint16_t)(t * t * 1180.0f);
+      }
     }
   }
 
-  osTft.drawCircle(waterCX * kCellW + 2, waterCY * kCellH + 2, 3, ST77XX_WHITE);
-  osTft.fillRect(0, 0, 160, 10, ST77XX_BLACK);
+  kernelBuiltR = kernelR;
+}
+
+static void waterReset(void) {
+  randomSeed(micros());
+  if (kernelBuiltR != kernelR) waterBuildKernel();
+
+  int id = 0;
+  const int cols = 12;
+  const int rows = (WATER_COUNT_MAX + cols - 1) / cols;
+  const float spacingX = 10.5f;
+  const float spacingY = 6.6f;
+  const float startX = (kOSW - (cols - 1) * spacingX) * 0.5f;
+  const float blockH = (rows - 1) * spacingY;
+  const float startY = kOSH - blockH - 8.0f;
+
+  for (int y = 0; y < rows; ++y) {
+    for (int x = 0; x < cols; ++x) {
+      if (id >= WATER_COUNT_MAX) break;
+      wx[id] = startX + x * spacingX + random(-1, 2);
+      wy[id] = startY + y * spacingY + random(-1, 2);
+      wvx[id] = 0.0f;
+      wvy[id] = 0.0f;
+      ++id;
+    }
+  }
+
+  for (int i = 0; i < DROP_COUNT_MAX; ++i) {
+    dropActive[i] = false;
+    dropLife[i] = 0;
+  }
+
+  forceX = 0.0f;
+  forceY = 0.0f;
+  splashCooldown = 0;
+  waterFrame = 0;
+  activeWaterCount = 82;
+}
+
+static void waterUpdateAmount() {
+  const int potRaw = analogRead(OS_POT_PIN);
+  potFiltered = potFiltered <= 0.1f ? potRaw : potFiltered * 0.92f + potRaw * 0.08f;
+  const float t = osClamp(potFiltered / 4095.0f, 0.0f, 1.0f);
+
+  int targetWaterCount = WATER_COUNT_MIN + (int)(t * (WATER_COUNT_MAX - WATER_COUNT_MIN));
+  int targetKernelR = KERNEL_R_MIN + (int)(t * (KERNEL_R_MAX - KERNEL_R_MIN) + 0.5f);
+  targetWaterCount = constrain(targetWaterCount, WATER_COUNT_MIN, WATER_COUNT_MAX);
+  targetKernelR = constrain(targetKernelR, KERNEL_R_MIN, KERNEL_R_MAX);
+
+  if (targetWaterCount > activeWaterCount) {
+    for (int i = activeWaterCount; i < targetWaterCount; ++i) {
+      const int ref = random(0, activeWaterCount > 0 ? activeWaterCount : 1);
+      wx[i] = osClamp(wx[ref] + random(-8, 9), WATER_RADIUS, kOSW - 1 - WATER_RADIUS);
+      wy[i] = osClamp(wy[ref] + random(-8, 9), WATER_RADIUS, kOSH - 1 - WATER_RADIUS);
+      wvx[i] = wvx[ref] * 0.15f;
+      wvy[i] = wvy[ref] * 0.15f;
+    }
+  }
+
+  activeWaterCount = targetWaterCount;
+  kernelR = targetKernelR;
+  if (kernelR != kernelBuiltR) waterBuildKernel();
+}
+
+static void waterConstrainParticle(int i) {
+  const float bounce = -0.18f;
+  if (wx[i] < WATER_RADIUS) { wx[i] = WATER_RADIUS; wvx[i] *= bounce; }
+  if (wx[i] > kOSW - 1 - WATER_RADIUS) { wx[i] = kOSW - 1 - WATER_RADIUS; wvx[i] *= bounce; }
+  if (wy[i] < WATER_RADIUS) { wy[i] = WATER_RADIUS; wvy[i] *= bounce; }
+  if (wy[i] > kOSH - 1 - WATER_RADIUS) { wy[i] = kOSH - 1 - WATER_RADIUS; wvy[i] *= bounce; }
+}
+
+static void waterSolvePairs() {
+  const float targetDist = WATER_RADIUS * 1.52f;
+  const float targetDistSq = targetDist * targetDist;
+
+  for (int i = 0; i < activeWaterCount; ++i) {
+    for (int j = i + 1; j < activeWaterCount; ++j) {
+      const float dx = wx[j] - wx[i];
+      const float dy = wy[j] - wy[i];
+      const float d2 = dx * dx + dy * dy;
+      if (d2 < 0.0001f || d2 >= targetDistSq) continue;
+
+      const float dist = sqrtf(d2);
+      const float overlap = targetDist - dist;
+      const float nx = dx / dist;
+      const float ny = dy / dist;
+      const float push = overlap * 0.46f;
+
+      wx[i] -= nx * push;
+      wy[i] -= ny * push;
+      wx[j] += nx * push;
+      wy[j] += ny * push;
+    }
+  }
+}
+
+static void waterApplyViscosity() {
+  const float range = WATER_RADIUS * 2.65f;
+  const float rangeSq = range * range;
+
+  for (int i = 0; i < activeWaterCount; ++i) {
+    for (int j = i + 1; j < activeWaterCount; ++j) {
+      const float dx = wx[j] - wx[i];
+      const float dy = wy[j] - wy[i];
+      const float d2 = dx * dx + dy * dy;
+      if (d2 >= rangeSq) continue;
+
+      const float deltaVX = wvx[j] - wvx[i];
+      const float deltaVY = wvy[j] - wvy[i];
+      const float blend = 0.022f;
+
+      wvx[i] += deltaVX * blend;
+      wvy[i] += deltaVY * blend;
+      wvx[j] -= deltaVX * blend;
+      wvy[j] -= deltaVY * blend;
+    }
+  }
+}
+
+static void waterSpawnDrop(float x, float y, float vx, float vy, float radius) {
+  for (int i = 0; i < DROP_COUNT_MAX; ++i) {
+    if (!dropActive[i]) {
+      dropActive[i] = true;
+      dropX[i] = x;
+      dropY[i] = y;
+      dropVX[i] = vx;
+      dropVY[i] = vy;
+      dropRadius[i] = radius;
+      dropLife[i] = 64;
+      return;
+    }
+  }
+}
+
+static void waterEmitSplash(float fx, float fy, float strength) {
+  if (activeWaterCount <= 0) return;
+  float len = sqrtf(fx * fx + fy * fy);
+  float upX = 0.0f;
+  float upY = -1.0f;
+  if (len > 0.05f) {
+    upX = -fx / len;
+    upY = -fy / len;
+  }
+
+  for (int n = 0; n < 5; ++n) {
+    const int id = random(0, activeWaterCount);
+    const float side = random(-100, 101) / 100.0f;
+    const float sideX = -upY;
+    const float sideY = upX;
+    const float launch = 0.8f + strength * 0.34f;
+    const float spread = 0.42f + strength * 0.08f;
+    waterSpawnDrop(wx[id], wy[id], wvx[id] + upX * launch + sideX * side * spread,
+                   wvy[id] + upY * launch + sideY * side * spread, random(1, 3));
+    wvx[id] += upX * 0.12f;
+    wvy[id] += upY * 0.12f;
+  }
+}
+
+static void waterUpdateDrops() {
+  for (int i = 0; i < DROP_COUNT_MAX; ++i) {
+    if (!dropActive[i]) continue;
+    dropVX[i] += forceX * 0.012f;
+    dropVY[i] += 0.070f + forceY * 0.012f;
+    dropVX[i] *= 0.994f;
+    dropVY[i] *= 0.994f;
+    dropX[i] += dropVX[i];
+    dropY[i] += dropVY[i];
+    dropLife[i]--;
+
+    if (dropX[i] < 2) { dropX[i] = 2; dropVX[i] *= -0.24f; }
+    if (dropX[i] > kOSW - 3) { dropX[i] = kOSW - 3; dropVX[i] *= -0.24f; }
+    if (dropY[i] < 2) { dropY[i] = 2; dropVY[i] *= -0.20f; }
+
+    for (int j = 0; j < activeWaterCount; ++j) {
+      const float dx = dropX[i] - wx[j];
+      const float dy = dropY[i] - wy[j];
+      if (dx * dx + dy * dy < WATER_RADIUS * WATER_RADIUS * 1.85f) {
+        wvx[j] += dropVX[i] * 0.045f;
+        wvy[j] += dropVY[i] * 0.045f;
+        dropActive[i] = false;
+        break;
+      }
+    }
+
+    if (dropY[i] > kOSH || dropLife[i] <= 0) dropActive[i] = false;
+  }
+}
+
+static void waterBuildDensityField() {
+  memset(densityField, 0, sizeof(densityField));
+  const int kernelSize = kernelR * 2 + 1;
+
+  for (int i = 0; i < activeWaterCount; ++i) {
+    const int centerX = (int)(wx[i] / GRID_STEP);
+    const int centerY = (int)(wy[i] / GRID_STEP);
+
+    for (int ky = -kernelR; ky <= kernelR; ++ky) {
+      const int fy = centerY + ky;
+      if (fy < 0 || fy >= FIELD_H) continue;
+      for (int kx = -kernelR; kx <= kernelR; ++kx) {
+        const int fx = centerX + kx;
+        if (fx < 0 || fx >= FIELD_W) continue;
+        const uint16_t add = kernel[(ky + kernelR) * kernelSize + (kx + kernelR)];
+        if (!add) continue;
+        const int fieldIndex = fy * FIELD_W + fx;
+        const uint32_t value = densityField[fieldIndex] + add;
+        densityField[fieldIndex] = value > 65535 ? 65535 : value;
+      }
+    }
+  }
+}
+
+static void waterDrawBody() {
+  osTft.fillScreen(C_BG_WATER);
+  waterBuildDensityField();
+
+  for (int gy = 0; gy < FIELD_H; ++gy) {
+    int runStart = -1;
+    for (int gx = 0; gx < FIELD_W; ++gx) {
+      const bool inside = densityField[gy * FIELD_W + gx] >= FIELD_THRESHOLD;
+      if (inside && runStart < 0) runStart = gx;
+      const bool last = gx == FIELD_W - 1;
+      if ((!inside || last) && runStart >= 0) {
+        const int runEnd = (inside && last) ? gx : gx - 1;
+        const uint16_t color = ((gy + (int)(waterFrame & 3)) & 7) == 0 ? C_WATER : C_WATER_DEEP;
+        osTft.fillRect(runStart * GRID_STEP, gy * GRID_STEP,
+                       (runEnd - runStart + 1) * GRID_STEP, GRID_STEP, color);
+        runStart = -1;
+      }
+    }
+  }
+
+  // Edge highlight: draw cells that are inside but have at least one outside neighbor.
+  for (int gy = 1; gy < FIELD_H - 1; ++gy) {
+    for (int gx = 1; gx < FIELD_W - 1; ++gx) {
+      const int idx = gy * FIELD_W + gx;
+      if (densityField[idx] < FIELD_THRESHOLD) continue;
+      if (densityField[idx - 1] < FIELD_THRESHOLD || densityField[idx + 1] < FIELD_THRESHOLD ||
+          densityField[idx - FIELD_W] < FIELD_THRESHOLD || densityField[idx + FIELD_W] < FIELD_THRESHOLD) {
+        osTft.drawPixel(gx * GRID_STEP, gy * GRID_STEP, C_EDGE);
+      }
+    }
+  }
+
+  // Droplets.
+  for (int i = 0; i < DROP_COUNT_MAX; ++i) {
+    if (!dropActive[i]) continue;
+    osTft.fillCircle((int)dropX[i], (int)dropY[i], (int)dropRadius[i], C_EDGE);
+  }
+
+  // Tiny HUD strip.  It is deliberately minimal so the water remains fullscreen.
+  osTft.fillRect(0, 0, 160, 9, ST77XX_BLACK);
   osTft.setTextSize(1);
   osTft.setTextColor(ST77XX_WHITE);
   osTft.setCursor(4, 1);
   osTft.print("Water Lab  B:Menu");
+}
+
+static void waterStep(bool aDown, bool leftSWDown) {
+  waterUpdateAmount();
+
+  const int rawX = analogRead(OS_LEFT_JOY_X_PIN);
+  const int rawY = analogRead(OS_LEFT_JOY_Y_PIN);
+  float joyX = osClamp((rawX - 2048) / 1800.0f, -1.0f, 1.0f);
+  float joyY = osClamp((rawY - 2048) / 1800.0f, -1.0f, 1.0f) * -1.0f;
+  joyX = osDeadzone(joyX, 0.14f);
+  joyY = osDeadzone(joyY, 0.14f);
+
+  forceX = forceX * 0.84f + joyX * 0.16f;
+  forceY = forceY * 0.84f + joyY * 0.16f;
+
+  // Subtle alive drift so water never looks frozen when the stick is centered.
+  const float wobbleX = sinf(waterFrame * 0.035f) * 0.018f;
+  const float wobbleY = cosf(waterFrame * 0.027f) * 0.012f;
+
+  for (int i = 0; i < activeWaterCount; ++i) {
+    wvx[i] += (forceX + wobbleX) * 0.27f;
+    wvy[i] += (forceY + wobbleY) * 0.27f + 0.015f;
+    wvx[i] *= 0.986f;
+    wvy[i] *= 0.986f;
+    wvx[i] = osClamp(wvx[i], -4.2f, 4.2f);
+    wvy[i] = osClamp(wvy[i], -4.2f, 4.2f);
+    wx[i] += wvx[i];
+    wy[i] += wvy[i];
+    waterConstrainParticle(i);
+  }
+
+  waterSolvePairs();
+  waterSolvePairs();
+  waterSolvePairs();
+
+  for (int i = 0; i < activeWaterCount; ++i) waterConstrainParticle(i);
+  waterApplyViscosity();
+  waterUpdateDrops();
+
+  if (splashCooldown > 0) splashCooldown--;
+  if ((aDown || leftSWDown) && splashCooldown <= 0) {
+    waterEmitSplash(forceX, forceY, 2.0f);
+    splashCooldown = 8;
+  }
 }
 
 bool ESP32Toy_OSWaterTick(void) {
@@ -255,7 +577,7 @@ bool ESP32Toy_OSWaterTick(void) {
   static bool waterInitialized = false;
   if (!waterInitialized) {
     waterReset();
-    osTft.fillScreen(ST77XX_BLACK);
+    osTft.fillScreen(C_BG_WATER);
     waterInitialized = true;
     lastFrameMs = 0;
   }
@@ -272,39 +594,12 @@ bool ESP32Toy_OSWaterTick(void) {
     return true;
   }
 
-  const int rawX = analogRead(OS_LEFT_JOY_X_PIN);
-  const int rawY = analogRead(OS_LEFT_JOY_Y_PIN);
-  const float ax = osClamp((rawX - 2048) / 1800.0f, -1.0f, 1.0f);
-  const float ay = osClamp((rawY - 2048) / 1800.0f, -1.0f, 1.0f) * -1.0f;
-
-  waterVX = waterVX * 0.82f + ax * 0.58f;
-  waterVY = waterVY * 0.82f + ay * 0.58f;
-  waterCX = constrain((int)(waterCX + waterVX), 2, kWaterCols - 3);
-  waterCY = constrain((int)(waterCY + waterVY), 2, kWaterRows - 3);
-
-  if (aDown || leftSWDown) {
-    waterSplash(waterCX, waterCY, 1.8f);
-  }
-
   const uint32_t now = millis();
-  if (now - lastFrameMs < 32) {
-    return false;
-  }
+  if (now - lastFrameMs < 32) return false;
   lastFrameMs = now;
+  waterFrame++;
 
-  for (int y = 1; y < kWaterRows - 1; ++y) {
-    for (int x = 1; x < kWaterCols - 1; ++x) {
-      const float n = (waterA[y - 1][x] + waterA[y + 1][x] + waterA[y][x - 1] + waterA[y][x + 1]) * 0.5f - waterB[y][x];
-      waterB[y][x] = n * 0.965f;
-    }
-  }
-
-  for (int y = 1; y < kWaterRows - 1; ++y) {
-    for (int x = 1; x < kWaterCols - 1; ++x) {
-      waterA[y][x] = waterB[y][x];
-    }
-  }
-
-  waterDraw();
+  waterStep(aDown, leftSWDown);
+  waterDrawBody();
   return false;
 }
