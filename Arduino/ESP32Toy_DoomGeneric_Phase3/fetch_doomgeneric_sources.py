@@ -26,8 +26,9 @@ import urllib.request
 from pathlib import Path
 from typing import Iterable
 
-API_DIR = "https://api.github.com/repos/ozkl/doomgeneric/contents/doomgeneric?ref=master"
-USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.5"
+TREE_API = "https://api.github.com/repos/ozkl/doomgeneric/git/trees/master?recursive=1"
+RAW_BASE = "https://raw.githubusercontent.com/ozkl/doomgeneric/master/doomgeneric"
+USER_AGENT = "ESP32Toy-DoomGeneric-Fetcher/1.6"
 TARGET_DIR = Path(__file__).resolve().parent
 
 CORE_C_FILES = {
@@ -113,6 +114,49 @@ CORE_C_FILES = {
     "doomgeneric.c",
 }
 
+REQUIRED_HEADERS = {
+    "sha1.h",
+    "z_zone.h",
+    "doomgeneric.h",
+    "doomtype.h",
+    "doomdef.h",
+    "doomfeatures.h",
+    "doomkeys.h",
+    "config.h",
+    "i_system.h",
+    "i_video.h",
+    "i_swap.h",
+    "m_fixed.h",
+    "r_defs.h",
+    "r_local.h",
+    "r_main.h",
+    "r_plane.h",
+    "r_sky.h",
+    "r_state.h",
+    "r_things.h",
+    "d_event.h",
+    "d_main.h",
+    "d_mode.h",
+    "d_net.h",
+    "d_player.h",
+    "d_ticcmd.h",
+    "d_think.h",
+    "deh_main.h",
+    "deh_str.h",
+    "m_argv.h",
+    "m_config.h",
+    "m_controls.h",
+    "m_misc.h",
+    "m_random.h",
+    "p_mobj.h",
+    "p_local.h",
+    "tables.h",
+    "v_video.h",
+    "v_patch.h",
+    "w_wad.h",
+    "w_file.h",
+}
+
 
 def fetch_bytes(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -130,6 +174,24 @@ def should_import(name: str) -> bool:
     if name.endswith(".c"):
         return name in CORE_C_FILES
     return False
+
+
+def list_upstream_files() -> dict[str, str]:
+    data = fetch_json(TREE_API)
+    if data.get("truncated"):
+        raise RuntimeError("GitHub tree result was truncated; cannot safely import DoomGeneric core")
+
+    out: dict[str, str] = {}
+    for item in data.get("tree", []):
+        path = item.get("path", "")
+        if not path.startswith("doomgeneric/"):
+            continue
+        if item.get("type") != "blob":
+            continue
+        name = Path(path).name
+        if should_import(name):
+            out[name] = f"{RAW_BASE}/{name}"
+    return out
 
 
 def ensure_esp_attr_include(text: str, anchor: str) -> str:
@@ -379,30 +441,25 @@ def write_manifest(imported: Iterable[str]) -> None:
 def main() -> int:
     print("[ESP32Toy Doom] Listing upstream DoomGeneric files...")
     try:
-        entries = fetch_json(API_DIR)
-    except urllib.error.URLError as exc:
-        print(f"[ERROR] Could not reach GitHub: {exc}", file=sys.stderr)
+        upstream_files = list_upstream_files()
+    except (urllib.error.URLError, RuntimeError) as exc:
+        print(f"[ERROR] Could not list upstream files: {exc}", file=sys.stderr)
         return 2
 
+    required_names = CORE_C_FILES | REQUIRED_HEADERS
+    missing_upstream = sorted(name for name in required_names if name not in upstream_files)
+    if missing_upstream:
+        print(f"[ERROR] Upstream file list is missing required files: {', '.join(missing_upstream)}", file=sys.stderr)
+        return 5
+
     imported: list[str] = []
-    skipped: list[str] = []
-
-    for entry in entries:
-        name = entry.get("name", "")
-        download_url = entry.get("download_url")
-        if not name or not download_url:
-            continue
-        if not should_import(name):
-            skipped.append(name)
-            continue
-
+    for name in sorted(required_names):
         print(f"[FETCH] {name}")
         try:
-            data = fetch_bytes(download_url)
+            data = fetch_bytes(upstream_files[name])
         except urllib.error.URLError as exc:
             print(f"[ERROR] Failed to download {name}: {exc}", file=sys.stderr)
             return 3
-
         (TARGET_DIR / name).write_bytes(data)
         imported.append(name)
 
@@ -417,7 +474,6 @@ def main() -> int:
     print("")
     print(f"[DONE] Imported {len(imported)} files into:")
     print(f"       {TARGET_DIR}")
-    print(f"[INFO] Skipped {len(skipped)} non-core or desktop-specific files.")
     print("[NEXT] Open ESP32Toy_DoomGeneric_Phase3.ino in Arduino IDE and compile.")
     print("       This imported tree is patched for classic 320x200 Doom rendering,")
     print("       /littlefs IWAD discovery, no-audio runtime mode, PSRAM-first")
