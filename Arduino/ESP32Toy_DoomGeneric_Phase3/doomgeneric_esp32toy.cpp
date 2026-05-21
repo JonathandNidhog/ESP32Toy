@@ -130,15 +130,16 @@ static float axisLeftY = 0.0f;
 
 static const float DEADZONE = 0.18f;
 
-// Final control directions confirmed in the raycaster prototype:
-// - Old/right stick Y: move forward/backward, inverted in the latest test.
-// - Old/right stick X: strafe left/right.
-// - New/left stick X: turn camera left/right, inverted in the latest test.
-// - New/left stick Y is read/calibrated for future Doom-specific extensions,
-//   but vanilla Doom itself has no free vertical-look keyboard axis.
+// Final Doom controls:
+// - Old/right stick Y: move forward/backward.
+// - Old/right stick X: strafe left/right, swapped per final hardware test.
+// - New/left stick X: turn camera left/right.
+// - New/left stick Y: read/calibrated and swapped for the base OS/future use;
+//   vanilla Doom itself has no free vertical-look keyboard axis.
 static const float MOVE_SIGN = 1.0f;
-static const float STRAFE_SIGN = 1.0f;
+static const float STRAFE_SIGN = -1.0f;
 static const float TURN_SIGN = 1.0f;
+static const float LEFT_Y_SIGN = -1.0f;
 
 // ---------------- Digital event queue ----------------
 struct KeyEvent {
@@ -368,6 +369,7 @@ static void updateAnalogKeys() {
   const float moveAxis = axisRightY * MOVE_SIGN;
   const float strafeAxis = axisRightX * STRAFE_SIGN;
   const float turnAxis = axisLeftX * TURN_SIGN;
+  const float leftVerticalAxis = axisLeftY * LEFT_Y_SIGN;
 
   setDoomKey(KEY_UPARROW, moveAxis > 0.35f);
   setDoomKey(KEY_DOWNARROW, moveAxis < -0.35f);
@@ -376,9 +378,10 @@ static void updateAnalogKeys() {
   setDoomKey(KEY_RIGHTARROW, turnAxis > 0.35f);
   setDoomKey(KEY_LEFTARROW, turnAxis < -0.35f);
 
-  // Keep the new/left vertical axis sampled and calibrated even though
-  // the vanilla Doom keyboard API does not expose mouse-look pitch.
-  (void)axisLeftY;
+  // Keep the new/left vertical axis sampled, deadzoned and inverted for the
+  // base OS / future Doom extensions.  Vanilla Doom keyboard input has no
+  // vertical look axis, so it is intentionally not bound to a Doom key here.
+  (void)leftVerticalAxis;
 }
 
 static void updateDigitalKeys() {
