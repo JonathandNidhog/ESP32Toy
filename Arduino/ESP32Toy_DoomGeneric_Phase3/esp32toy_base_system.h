@@ -13,5 +13,8 @@ void ESP32Toy_OSInitLauncher(bool doomReady);
 ESP32Toy_OSAction ESP32Toy_OSLauncherTick(bool doomReady);
 void ESP32Toy_OSRedrawLauncher(bool doomReady);
 
-// Returns true when the user asks to leave Water back to the launcher.
-bool ESP32Toy_OSWaterTick(void);
+// Water Lab V2 is a standalone LiquidOS-style module.  The old implementation
+// remains in esp32toy_base_system.cpp, but the application entry is redirected
+// here so Doom/base launcher code does not need to be touched.
+bool ESP32Toy_WaterLabV2Tick(void);
+#define ESP32Toy_OSWaterTick ESP32Toy_WaterLabV2Tick
