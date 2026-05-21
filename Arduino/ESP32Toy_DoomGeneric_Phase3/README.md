@@ -12,10 +12,32 @@ Target hardware:
 - RGB LEDs + vibration motor
 - **No SD card slot required**: the IWAD is loaded from board flash via LittleFS
 
+## Important Arduino IDE entry file
+
+Open this sketch using the folder-matching Arduino file:
+
+```text
+ESP32Toy_DoomGeneric_Phase3.ino
+```
+
+Do **not** open `Phase3_entry.ino` directly. Arduino IDE expects the main `.ino`
+file to match the folder name. If `Phase3_entry.ino` is opened directly, the IDE
+may create a temporary `Phase3_entry` sketch and compile only that one file,
+which causes linker errors such as:
+
+```text
+undefined reference to `doomgeneric_Create'
+undefined reference to `doomgeneric_Tick'
+```
+
+`Phase3_entry.ino` is now only a warning stub. The active `setup()` / `loop()`
+implementation lives in `ESP32Toy_DoomGeneric_Phase3.ino`.
+
 ## Current implementation status
 
 Tracked in this folder now:
-- `Phase3_entry.ino`
+- `ESP32Toy_DoomGeneric_Phase3.ino`
+- `Phase3_entry.ino` warning stub
 - `doomgeneric_esp32toy.h`
 - `doomgeneric_esp32toy.cpp`
 - `fetch_doomgeneric_sources.py`
@@ -141,6 +163,7 @@ That script downloads the official upstream DoomGeneric core C/H files into this
 
 - `doomgeneric.h` -> internal Doom framebuffer kept at classic `320x200`
 - `config.h` -> `FILES_DIR` changed to `/littlefs`
+- `doomfeatures.h` -> `FEATURE_SOUND` explicitly disabled
 - `i_system.c` -> Doom's large zone-memory allocation prefers PSRAM via `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` and falls back to `malloc()` only if needed
 - `doomgeneric.c` -> Doom's RGBA framebuffer allocation prefers PSRAM via `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` and falls back to `malloc()` only if needed
 
@@ -160,7 +183,7 @@ Once the upstream core compiles, the local user-side steps are:
 
 After the upstream core files are present in this folder:
 1. Run `python fetch_doomgeneric_sources.py`.
-2. Open `Phase3_entry.ino` in Arduino IDE.
+2. Open `ESP32Toy_DoomGeneric_Phase3.ino` in Arduino IDE.
 3. Compile for the ESP32-S3 board target.
 4. Fix any Arduino/ESP32-specific compile issues from the imported upstream C core.
 5. Confirm LittleFS + `/littlefs/doom1.wad` boot path on hardware.
