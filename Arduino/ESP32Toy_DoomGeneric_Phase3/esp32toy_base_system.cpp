@@ -1,8 +1,11 @@
 #include "esp32toy_base_system.h"
 
+#include <Arduino.h>
+#include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
+#include <esp_heap_caps.h>
 #include <math.h>
 #include <string.h>
 
@@ -14,6 +17,8 @@ extern Adafruit_ST7735 tft;
 // Same physical hardware pins as the Doom platform bridge.
 #define OS_TFT_BL   21
 #define OS_POT_PIN   1
+#define OS_I2C_SDA   4
+#define OS_I2C_SCL   5
 #define OS_RIGHT_JOY_X_PIN 16
 #define OS_RIGHT_JOY_Y_PIN  8
 #define OS_RIGHT_JOY_SW_PIN 6
@@ -25,8 +30,11 @@ extern Adafruit_ST7735 tft;
 
 static const int kOSW = 160;
 static const int kOSH = 128;
+static const int kFramePixels = kOSW * kOSH;
+static uint16_t *frameBuf = nullptr;
 
 static bool osDisplayReady = false;
+static bool osBootAnimPlayed = false;
 static uint8_t selectedItem = 0;
 static uint32_t lastNavMs = 0;
 static uint32_t lastFrameMs = 0;
@@ -75,7 +83,57 @@ static bool osDebouncedPressed(int pin, bool *rawPrev, bool *stable, uint32_t *c
   return *stable;
 }
 
-static void osDrawCentered(int y, const char *text, uint16_t color, uint8_t size = 1) {
+static void osAllocFrameBuffer() {
+  if (frameBuf) return;
+  frameBuf = (uint16_t*) heap_caps_malloc(kFramePixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!frameBuf) {
+    frameBuf = (uint16_t*) heap_caps_malloc(kFramePixels * sizeof(uint16_t), MALLOC_CAP_8BIT);
+  }
+}
+
+static void fbClear(uint16_t c) {
+  if (!frameBuf) return;
+  for (int i = 0; i < kFramePixels; ++i) frameBuf[i] = c;
+}
+
+static void fbPixel(int x, int y, uint16_t c) {
+  if (!frameBuf) return;
+  if ((unsigned)x >= kOSW || (unsigned)y >= kOSH) return;
+  frameBuf[y * kOSW + x] = c;
+}
+
+static void fbRect(int x, int y, int w, int h, uint16_t c) {
+  if (!frameBuf) return;
+  if (w <= 0 || h <= 0) return;
+  int x0 = max(0, x);
+  int y0 = max(0, y);
+  int x1 = min(kOSW, x + w);
+  int y1 = min(kOSH, y + h);
+  for (int yy = y0; yy < y1; ++yy) {
+    uint16_t *row = frameBuf + yy * kOSW;
+    for (int xx = x0; xx < x1; ++xx) row[xx] = c;
+  }
+}
+
+static void fbCircle(int cx, int cy, int r, uint16_t c) {
+  if (r <= 0) {
+    fbPixel(cx, cy, c);
+    return;
+  }
+  const int r2 = r * r;
+  for (int y = -r; y <= r; ++y) {
+    for (int x = -r; x <= r; ++x) {
+      if (x * x + y * y <= r2) fbPixel(cx + x, cy + y, c);
+    }
+  }
+}
+
+static void fbPush() {
+  if (!frameBuf) return;
+  osTft.drawRGBBitmap(0, 0, frameBuf, kOSW, kOSH);
+}
+
+static void osDrawCenteredDirect(int y, const char *text, uint16_t color, uint8_t size = 1) {
   osTft.setTextSize(size);
   osTft.setTextColor(color);
   int textWidth = (int)strlen(text) * 6 * size;
@@ -83,6 +141,119 @@ static void osDrawCentered(int y, const char *text, uint16_t color, uint8_t size
   if (x < 0) x = 0;
   osTft.setCursor(x, y);
   osTft.print(text);
+}
+
+// ============================================================
+// MPU6050, migrated from old LiquidOS water behavior
+// ============================================================
+static uint8_t mpuAddr = 0x68;
+static bool mpuOk = false;
+static bool mpuTriedInit = false;
+
+static float ax = 0.0f;
+static float ay = 0.0f;
+static float az = 1.0f;
+static float gx = 0.0f;
+static float gy = 0.0f;
+static float gz = 0.0f;
+static float biasAX = 0.0f;
+static float biasAY = 0.0f;
+static float lastAX = 0.0f;
+static float lastAY = 0.0f;
+static float lastAZ = 1.0f;
+
+static bool osCheckI2C(uint8_t address) {
+  Wire.beginTransmission(address);
+  return Wire.endTransmission() == 0;
+}
+
+static bool osReadMPU() {
+  if (!mpuOk) return false;
+
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(0x3B);
+  if (Wire.endTransmission(false) != 0) return false;
+
+  Wire.requestFrom(mpuAddr, (uint8_t)14, (uint8_t)true);
+  if (Wire.available() < 14) return false;
+
+  int16_t rawAX = (int16_t)((Wire.read() << 8) | Wire.read());
+  int16_t rawAY = (int16_t)((Wire.read() << 8) | Wire.read());
+  int16_t rawAZ = (int16_t)((Wire.read() << 8) | Wire.read());
+
+  Wire.read();
+  Wire.read();
+
+  int16_t rawGX = (int16_t)((Wire.read() << 8) | Wire.read());
+  int16_t rawGY = (int16_t)((Wire.read() << 8) | Wire.read());
+  int16_t rawGZ = (int16_t)((Wire.read() << 8) | Wire.read());
+
+  ax = rawAX / 16384.0f;
+  ay = rawAY / 16384.0f;
+  az = rawAZ / 16384.0f;
+  gx = rawGX / 131.0f;
+  gy = rawGY / 131.0f;
+  gz = rawGZ / 131.0f;
+  return true;
+}
+
+static void osInitMPU() {
+  if (mpuTriedInit) return;
+  mpuTriedInit = true;
+
+  Wire.setPins(OS_I2C_SDA, OS_I2C_SCL);
+  Wire.begin();
+  delay(60);
+
+  if (osCheckI2C(0x68)) {
+    mpuAddr = 0x68;
+    mpuOk = true;
+  } else if (osCheckI2C(0x69)) {
+    mpuAddr = 0x69;
+    mpuOk = true;
+  } else {
+    mpuOk = false;
+    return;
+  }
+
+  const uint8_t initRegs[][2] = {
+    {0x6B, 0x00},
+    {0x1A, 0x03},
+    {0x1C, 0x00},
+    {0x1B, 0x00}
+  };
+
+  for (uint8_t i = 0; i < 4; ++i) {
+    Wire.beginTransmission(mpuAddr);
+    Wire.write(initRegs[i][0]);
+    Wire.write(initRegs[i][1]);
+    Wire.endTransmission(true);
+  }
+
+  float sumAX = 0.0f;
+  float sumAY = 0.0f;
+  int valid = 0;
+  for (int i = 0; i < 80; ++i) {
+    if (osReadMPU()) {
+      sumAX += ax;
+      sumAY += ay;
+      valid++;
+    }
+    delay(4);
+  }
+  if (valid > 0) {
+    biasAX = sumAX / valid;
+    biasAY = sumAY / valid;
+  }
+  lastAX = ax;
+  lastAY = ay;
+  lastAZ = az;
+}
+
+static void mapBaseVectorToScreen(float baseX, float baseY, float *outX, float *outY) {
+  // Same tested landscape rotation 3 mapping from old LiquidOS.
+  *outX = -baseY;
+  *outY = baseX;
 }
 
 static void osEnsureHardware(void) {
@@ -101,6 +272,8 @@ static void osEnsureHardware(void) {
   pinMode(OS_KEY_A_PIN, INPUT_PULLUP);
   pinMode(OS_KEY_B_PIN, INPUT_PULLUP);
 
+  osAllocFrameBuffer();
+  osInitMPU();
   osDisplayReady = true;
 }
 
@@ -126,16 +299,31 @@ static void osDrawAppRow(int y, const char *label, bool selected, bool enabled) 
   }
 }
 
+static void osBootAnimation(bool doomReady) {
+  if (osBootAnimPlayed) return;
+  osBootAnimPlayed = true;
+
+  for (int f = 0; f < 18; ++f) {
+    uint8_t glow = (uint8_t)(20 + f * 7);
+    osTft.fillScreen(osRGB565(1, 4, 12));
+    osTft.drawRoundRect(14, 22, 132, 76, 8, osRGB565(glow, glow + 20, 255));
+    osDrawCenteredDirect(38, "ESP32Toy", ST77XX_WHITE, 2);
+    osDrawCenteredDirect(62, doomReady ? "DOOM READY" : "WATER READY", doomReady ? ST77XX_GREEN : ST77XX_CYAN, 1);
+    osTft.fillRect(30, 86, (f * 100) / 17, 4, osRGB565(55, 125, 255));
+    delay(18);
+  }
+}
+
 void ESP32Toy_OSRedrawLauncher(bool doomReady) {
   osEnsureHardware();
   osTft.fillScreen(ST77XX_BLACK);
   osTft.fillRect(0, 0, kOSW, 20, osRGB565(95, 12, 8));
-  osDrawCentered(5, "ESP32Toy OS", ST77XX_WHITE, 1);
+  osDrawCenteredDirect(5, "ESP32Toy OS", ST77XX_WHITE, 1);
 
   osTft.setTextSize(1);
   osTft.setTextColor(osRGB565(170, 170, 170));
   osTft.setCursor(12, 28);
-  osTft.print("Select app");
+  osTft.print(mpuOk ? "Select app   GYRO" : "Select app   NO GYRO");
 
   osDrawAppRow(44, "Water Lab", selectedItem == 0, true);
   osDrawAppRow(74, "DOOM", selectedItem == 1, doomReady);
@@ -146,12 +334,13 @@ void ESP32Toy_OSRedrawLauncher(bool doomReady) {
 
   if (millis() < warningUntilMs) {
     osTft.fillRect(12, 98, 136, 11, ST77XX_BLACK);
-    osDrawCentered(99, "doom1.wad not ready", ST77XX_YELLOW, 1);
+    osDrawCenteredDirect(99, "doom1.wad not ready", ST77XX_YELLOW, 1);
   }
 }
 
 void ESP32Toy_OSInitLauncher(bool doomReady) {
   osEnsureHardware();
+  osBootAnimation(doomReady);
   selectedItem = 0;
   lastNavMs = 0;
   warningUntilMs = 0;
@@ -170,7 +359,8 @@ ESP32Toy_OSAction ESP32Toy_OSLauncherTick(bool doomReady) {
   aPrev = aDown;
 
   const int rawY = analogRead(OS_LEFT_JOY_Y_PIN);
-  const float y = osClamp((rawY - 2048) / 1800.0f, -1.0f, 1.0f) * -1.0f;
+  // Final hardware direction: new joystick Y is inverted.
+  const float y = osDeadzone(osClamp((rawY - 2048) / 1800.0f, -1.0f, 1.0f) * -1.0f, 0.14f);
   const uint32_t now = millis();
   if (now - lastNavMs > 180) {
     if (y > 0.45f && selectedItem > 0) {
@@ -217,7 +407,7 @@ static float wy[WATER_COUNT_MAX];
 static float wvx[WATER_COUNT_MAX];
 static float wvy[WATER_COUNT_MAX];
 
-static const int DROP_COUNT_MAX = 14;
+static const int DROP_COUNT_MAX = 16;
 static bool dropActive[DROP_COUNT_MAX];
 static float dropX[DROP_COUNT_MAX];
 static float dropY[DROP_COUNT_MAX];
@@ -242,13 +432,17 @@ static const uint16_t FIELD_THRESHOLD = 455;
 
 static float forceX = 0.0f;
 static float forceY = 0.0f;
+static float joystickForceX = 0.0f;
+static float joystickForceY = 0.0f;
 static float potFiltered = 0.0f;
 static uint32_t waterFrame = 0;
 
-static const uint16_t C_WATER = 0x3D7F;      // bright blue
-static const uint16_t C_WATER_DEEP = 0x01B1; // dark blue
-static const uint16_t C_EDGE = 0xB73F;       // pale highlight
-static const uint16_t C_BG_WATER = 0x0007;   // nearly black blue
+static const uint16_t C_WATER = 0x3D7F;
+static const uint16_t C_WATER_MID = 0x1C9F;
+static const uint16_t C_WATER_DEEP = 0x01B1;
+static const uint16_t C_EDGE = 0xB73F;
+static const uint16_t C_WHITE = 0xFFFF;
+static const uint16_t C_BG_WATER = 0x0007;
 
 static void waterBuildKernel() {
   memset(kernel, 0, sizeof(kernel));
@@ -302,14 +496,22 @@ static void waterReset(void) {
 
   forceX = 0.0f;
   forceY = 0.0f;
+  joystickForceX = 0.0f;
+  joystickForceY = 0.0f;
   splashCooldown = 0;
   waterFrame = 0;
   activeWaterCount = 82;
+
+  if (mpuOk) {
+    lastAX = ax;
+    lastAY = ay;
+    lastAZ = az;
+  }
 }
 
 static void waterUpdateAmount() {
   const int potRaw = analogRead(OS_POT_PIN);
-  potFiltered = potFiltered <= 0.1f ? potRaw : potFiltered * 0.92f + potRaw * 0.08f;
+  potFiltered = potFiltered <= 0.1f ? potRaw : potFiltered * 0.90f + potRaw * 0.10f;
   const float t = osClamp(potFiltered / 4095.0f, 0.0f, 1.0f);
 
   int targetWaterCount = WATER_COUNT_MIN + (int)(t * (WATER_COUNT_MAX - WATER_COUNT_MIN));
@@ -397,7 +599,7 @@ static void waterSpawnDrop(float x, float y, float vx, float vy, float radius) {
       dropVX[i] = vx;
       dropVY[i] = vy;
       dropRadius[i] = radius;
-      dropLife[i] = 64;
+      dropLife[i] = 72;
       return;
     }
   }
@@ -405,6 +607,7 @@ static void waterSpawnDrop(float x, float y, float vx, float vy, float radius) {
 
 static void waterEmitSplash(float fx, float fy, float strength) {
   if (activeWaterCount <= 0) return;
+
   float len = sqrtf(fx * fx + fy * fy);
   float upX = 0.0f;
   float upY = -1.0f;
@@ -413,17 +616,40 @@ static void waterEmitSplash(float fx, float fy, float strength) {
     upY = -fy / len;
   }
 
-  for (int n = 0; n < 5; ++n) {
-    const int id = random(0, activeWaterCount);
+  int surfaceIds[WATER_COUNT_MAX];
+  float surfaceScores[WATER_COUNT_MAX];
+  for (int i = 0; i < activeWaterCount; ++i) {
+    surfaceIds[i] = i;
+    surfaceScores[i] = wx[i] * upX + wy[i] * upY;
+  }
+
+  const int surfacePickCount = min(8, activeWaterCount);
+  for (int a = 0; a < surfacePickCount; ++a) {
+    int best = a;
+    for (int b = a + 1; b < activeWaterCount; ++b) {
+      if (surfaceScores[b] > surfaceScores[best]) best = b;
+    }
+    float tempScore = surfaceScores[a];
+    surfaceScores[a] = surfaceScores[best];
+    surfaceScores[best] = tempScore;
+    int tempId = surfaceIds[a];
+    surfaceIds[a] = surfaceIds[best];
+    surfaceIds[best] = tempId;
+  }
+
+  const int count = constrain((int)(strength * 1.45f), 3, 7);
+  for (int n = 0; n < count; ++n) {
+    const int id = surfaceIds[random(0, surfacePickCount)];
     const float side = random(-100, 101) / 100.0f;
     const float sideX = -upY;
     const float sideY = upX;
-    const float launch = 0.8f + strength * 0.34f;
-    const float spread = 0.42f + strength * 0.08f;
+    const float launch = 0.90f + strength * 0.44f;
+    const float spread = 0.48f + strength * 0.11f;
+
     waterSpawnDrop(wx[id], wy[id], wvx[id] + upX * launch + sideX * side * spread,
                    wvy[id] + upY * launch + sideY * side * spread, random(1, 3));
-    wvx[id] += upX * 0.12f;
-    wvy[id] += upY * 0.12f;
+    wvx[id] += upX * 0.14f;
+    wvy[id] += upY * 0.14f;
   }
 }
 
@@ -482,71 +708,117 @@ static void waterBuildDensityField() {
 }
 
 static void waterDrawBody() {
-  osTft.fillScreen(C_BG_WATER);
+  fbClear(C_BG_WATER);
   waterBuildDensityField();
 
-  for (int gy = 0; gy < FIELD_H; ++gy) {
+  // Water body.  Draw density runs into the framebuffer, not directly to TFT.
+  for (int gyIndex = 0; gyIndex < FIELD_H; ++gyIndex) {
     int runStart = -1;
-    for (int gx = 0; gx < FIELD_W; ++gx) {
-      const bool inside = densityField[gy * FIELD_W + gx] >= FIELD_THRESHOLD;
-      if (inside && runStart < 0) runStart = gx;
-      const bool last = gx == FIELD_W - 1;
+    for (int gxIndex = 0; gxIndex < FIELD_W; ++gxIndex) {
+      const bool inside = densityField[gyIndex * FIELD_W + gxIndex] >= FIELD_THRESHOLD;
+      if (inside && runStart < 0) runStart = gxIndex;
+
+      const bool last = gxIndex == FIELD_W - 1;
       if ((!inside || last) && runStart >= 0) {
-        const int runEnd = (inside && last) ? gx : gx - 1;
-        const uint16_t color = ((gy + (int)(waterFrame & 3)) & 7) == 0 ? C_WATER : C_WATER_DEEP;
-        osTft.fillRect(runStart * GRID_STEP, gy * GRID_STEP,
-                       (runEnd - runStart + 1) * GRID_STEP, GRID_STEP, color);
+        const int runEnd = (inside && last) ? gxIndex : gxIndex - 1;
+        uint16_t layerColor = C_WATER;
+        if (((gyIndex + (int)(waterFrame & 3)) & 7) == 0) layerColor = C_WATER_MID;
+        if (((gyIndex + (int)(waterFrame & 7)) & 15) == 0) layerColor = C_WATER_DEEP;
+        fbRect(runStart * GRID_STEP, gyIndex * GRID_STEP,
+               (runEnd - runStart + 1) * GRID_STEP, GRID_STEP, layerColor);
         runStart = -1;
       }
     }
   }
 
-  // Edge highlight: draw cells that are inside but have at least one outside neighbor.
-  for (int gy = 1; gy < FIELD_H - 1; ++gy) {
-    for (int gx = 1; gx < FIELD_W - 1; ++gx) {
-      const int idx = gy * FIELD_W + gx;
+  // Old LiquidOS-like top edge highlight.
+  for (int gyIndex = 0; gyIndex < FIELD_H; ++gyIndex) {
+    for (int gxIndex = 0; gxIndex < FIELD_W; ++gxIndex) {
+      const int idx = gyIndex * FIELD_W + gxIndex;
       if (densityField[idx] < FIELD_THRESHOLD) continue;
-      if (densityField[idx - 1] < FIELD_THRESHOLD || densityField[idx + 1] < FIELD_THRESHOLD ||
-          densityField[idx - FIELD_W] < FIELD_THRESHOLD || densityField[idx + FIELD_W] < FIELD_THRESHOLD) {
-        osTft.drawPixel(gx * GRID_STEP, gy * GRID_STEP, C_EDGE);
+      const bool topEdge = gyIndex == 0 || densityField[(gyIndex - 1) * FIELD_W + gxIndex] < FIELD_THRESHOLD;
+      if (topEdge) {
+        fbRect(gxIndex * GRID_STEP, gyIndex * GRID_STEP, GRID_STEP, 1, C_EDGE);
+        if (((gxIndex + waterFrame) & 9) == 0) fbPixel(gxIndex * GRID_STEP, gyIndex * GRID_STEP, C_WHITE);
       }
     }
   }
 
-  // Droplets.
+  // Droplets with highlight.
   for (int i = 0; i < DROP_COUNT_MAX; ++i) {
     if (!dropActive[i]) continue;
-    osTft.fillCircle((int)dropX[i], (int)dropY[i], (int)dropRadius[i], C_EDGE);
+    fbCircle((int)dropX[i], (int)dropY[i], (int)dropRadius[i], C_EDGE);
+    if (dropRadius[i] >= 2) fbPixel((int)dropX[i] - 1, (int)dropY[i] - 1, C_WHITE);
   }
 
-  // Tiny HUD strip.  It is deliberately minimal so the water remains fullscreen.
-  osTft.fillRect(0, 0, 160, 9, ST77XX_BLACK);
+  // Minimal HUD strip. Drawn into buffer too, then pushed once.
+  fbRect(0, 0, 160, 9, ST77XX_BLACK);
+  fbPush();
   osTft.setTextSize(1);
   osTft.setTextColor(ST77XX_WHITE);
   osTft.setCursor(4, 1);
-  osTft.print("Water Lab  B:Menu");
+  osTft.print(mpuOk ? "Water Lab  GYRO  B:Menu" : "Water Lab  NO GYRO  B:Menu");
+}
+
+static void waterReadJoystickForce(float *outX, float *outY) {
+  const int rawX = analogRead(OS_LEFT_JOY_X_PIN);
+  const int rawY = analogRead(OS_LEFT_JOY_Y_PIN);
+
+  float joyX = osClamp((rawX - 2048) / 1800.0f, -1.0f, 1.0f);
+  // Final hardware direction: new joystick Y is inverted.
+  float joyY = osClamp((rawY - 2048) / 1800.0f, -1.0f, 1.0f) * -1.0f;
+  joyX = osDeadzone(joyX, 0.14f);
+  joyY = osDeadzone(joyY, 0.14f);
+
+  *outX = joyX;
+  *outY = joyY;
 }
 
 static void waterStep(bool aDown, bool leftSWDown) {
   waterUpdateAmount();
 
-  const int rawX = analogRead(OS_LEFT_JOY_X_PIN);
-  const int rawY = analogRead(OS_LEFT_JOY_Y_PIN);
-  float joyX = osClamp((rawX - 2048) / 1800.0f, -1.0f, 1.0f);
-  float joyY = osClamp((rawY - 2048) / 1800.0f, -1.0f, 1.0f) * -1.0f;
-  joyX = osDeadzone(joyX, 0.14f);
-  joyY = osDeadzone(joyY, 0.14f);
+  float joyX = 0.0f;
+  float joyY = 0.0f;
+  waterReadJoystickForce(&joyX, &joyY);
+  joystickForceX = joystickForceX * 0.80f + joyX * 0.20f;
+  joystickForceY = joystickForceY * 0.80f + joyY * 0.20f;
 
-  forceX = forceX * 0.84f + joyX * 0.16f;
-  forceY = forceY * 0.84f + joyY * 0.16f;
+  bool gotMPU = osReadMPU();
+  float tiltX = 0.0f;
+  float tiltY = 0.0f;
+  float gyroScreenX = 0.0f;
+  float gyroScreenY = 0.0f;
+  float splashStrength = 0.0f;
 
-  // Subtle alive drift so water never looks frozen when the stick is centered.
-  const float wobbleX = sinf(waterFrame * 0.035f) * 0.018f;
-  const float wobbleY = cosf(waterFrame * 0.027f) * 0.012f;
+  if (gotMPU) {
+    float baseTiltX = 1.0f * (ax - biasAX);
+    float baseTiltY = -1.0f * (ay - biasAY);
+    if (fabsf(baseTiltX) < 0.03f) baseTiltX = 0.0f;
+    if (fabsf(baseTiltY) < 0.03f) baseTiltY = 0.0f;
+
+    mapBaseVectorToScreen(osClamp(baseTiltX * 2.10f, -1.0f, 1.0f),
+                          osClamp(baseTiltY * 2.10f, -1.0f, 1.0f),
+                          &tiltX, &tiltY);
+    mapBaseVectorToScreen(osClamp(gx * 0.008f, -1.3f, 1.3f),
+                          osClamp(gy * 0.008f, -1.3f, 1.3f),
+                          &gyroScreenX, &gyroScreenY);
+
+    const float jerk = fabsf(ax - lastAX) + fabsf(ay - lastAY) + fabsf(az - lastAZ);
+    lastAX = ax;
+    lastAY = ay;
+    lastAZ = az;
+    const float kick = fabsf(gx) * 0.0028f + fabsf(gy) * 0.0028f + fabsf(gz) * 0.0018f;
+    splashStrength = jerk * 6.5f + kick;
+  }
+
+  const float targetX = tiltX + joystickForceX * 0.75f;
+  const float targetY = tiltY + joystickForceY * 0.75f;
+  forceX = forceX * 0.84f + osClamp(targetX, -1.35f, 1.35f) * 0.16f;
+  forceY = forceY * 0.84f + osClamp(targetY, -1.35f, 1.35f) * 0.16f;
 
   for (int i = 0; i < activeWaterCount; ++i) {
-    wvx[i] += (forceX + wobbleX) * 0.27f;
-    wvy[i] += (forceY + wobbleY) * 0.27f + 0.015f;
+    wvx[i] += forceX * 0.27f + gyroScreenX * 0.18f;
+    wvy[i] += forceY * 0.27f + gyroScreenY * 0.18f + 0.012f;
     wvx[i] *= 0.986f;
     wvy[i] *= 0.986f;
     wvx[i] = osClamp(wvx[i], -4.2f, 4.2f);
@@ -565,6 +837,10 @@ static void waterStep(bool aDown, bool leftSWDown) {
   waterUpdateDrops();
 
   if (splashCooldown > 0) splashCooldown--;
+  if (splashStrength > 1.25f && splashCooldown <= 0) {
+    waterEmitSplash(forceX + gyroScreenX * 0.35f, forceY + gyroScreenY * 0.35f, splashStrength);
+    splashCooldown = 9;
+  }
   if ((aDown || leftSWDown) && splashCooldown <= 0) {
     waterEmitSplash(forceX, forceY, 2.0f);
     splashCooldown = 8;
@@ -577,7 +853,8 @@ bool ESP32Toy_OSWaterTick(void) {
   static bool waterInitialized = false;
   if (!waterInitialized) {
     waterReset();
-    osTft.fillScreen(C_BG_WATER);
+    fbClear(C_BG_WATER);
+    fbPush();
     waterInitialized = true;
     lastFrameMs = 0;
   }
