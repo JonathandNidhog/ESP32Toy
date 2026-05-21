@@ -62,7 +62,7 @@ void loop() {
     }
 
     case MODE_WATER: {
-      const bool backToLauncher = ESP32Toy_OSWaterTick();
+      const bool backToLauncher = ESP32Toy_WaterLabV2Tick();
       if (backToLauncher) {
         runtimeMode = MODE_LAUNCHER;
         ESP32Toy_OSRedrawLauncher(ESP32Toy_DoomPlatformReadyToStart());
